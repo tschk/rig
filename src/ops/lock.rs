@@ -16,6 +16,7 @@ pub fn run(_args: &LockArgs, g: &Globals) -> Result<u8> {
             version_req: dep.version.clone(),
             git: dep.git.clone(),
             path: dep.path.clone(),
+            url: dep.url.clone(),
         };
         // Prefer exact locked resolve
         let resolved = resolve::resolve(

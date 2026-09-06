@@ -72,6 +72,7 @@ pub fn run(args: &AddArgs, g: &Globals) -> Result<u8> {
             git: dep_git,
             rev: None,
             path: resolved.path.clone(),
+            url: resolved.url.clone(),
             features: resolved.features.clone(),
             default_features: resolved.default_features,
             expose: true,

@@ -84,3 +84,45 @@ fn init_and_list_in_temp() {
         .success()
         .stdout(predicate::str::contains("no dependencies"));
 }
+
+#[test]
+fn search_path_git_ecosystem_is_honest() {
+    rig()
+        .args(["search", "--odin", "foo"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no central registry"))
+        .stdout(predicate::str::contains("path:"));
+}
+
+#[test]
+fn add_path_non_cargo_updates_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname=\"demo\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), "").unwrap();
+    let vendor = dir.path().join("vendor/mylib");
+    std::fs::create_dir_all(&vendor).unwrap();
+
+    rig()
+        .current_dir(dir.path())
+        .args(["init"])
+        .assert()
+        .success();
+
+    let path_spec = format!("path:{}", vendor.display());
+    rig()
+        .current_dir(dir.path())
+        .args(["add", "--c", &path_spec])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("added"));
+
+    let manifest = std::fs::read_to_string(dir.path().join("rig.toml")).unwrap();
+    assert!(manifest.contains("mylib"), "manifest should list mylib: {manifest}");
+    assert!(manifest.contains("ecosystem") || manifest.contains("c"), "{manifest}");
+}

@@ -1,5 +1,10 @@
 pub mod cargo;
+pub mod dub;
 pub mod git_path;
+pub mod http;
+pub mod nim;
+pub mod nuget;
+pub mod zig;
 
 use crate::detect::Language;
 use anyhow::{Result, bail};
@@ -10,6 +15,8 @@ pub struct PackageSpec {
     pub version_req: Option<String>,
     pub git: Option<String>,
     pub path: Option<String>,
+    /// Direct package URL (used by Zig / URL pins).
+    pub url: Option<String>,
 }
 
 impl PackageSpec {
@@ -26,6 +33,7 @@ impl PackageSpec {
                 version_req: None,
                 git: Some(rest.to_string()),
                 path: None,
+                url: None,
             });
         }
         if let Some(path) = spec.strip_prefix("path:") {
@@ -38,6 +46,18 @@ impl PackageSpec {
                 version_req: None,
                 git: None,
                 path: Some(path.to_string()),
+                url: None,
+            });
+        }
+        if spec.starts_with("https://") || spec.starts_with("http://") {
+            let url = spec.to_string();
+            let name = url_package_name(&url);
+            return Ok(Self {
+                name,
+                version_req: None,
+                git: None,
+                path: None,
+                url: Some(url),
             });
         }
         if let Some((name, ver)) = spec.split_once('@') {
@@ -46,6 +66,7 @@ impl PackageSpec {
                 version_req: Some(ver.to_string()),
                 git: None,
                 path: None,
+                url: None,
             });
         }
         Ok(Self {
@@ -53,7 +74,39 @@ impl PackageSpec {
             version_req: None,
             git: None,
             path: None,
+            url: None,
         })
+    }
+}
+
+fn url_package_name(url: &str) -> String {
+    // Prefer repo name for GitHub archive URLs: …/org/pkg/archive/refs/tags/x.tar.gz
+    if let Some(idx) = url.find("/archive/") {
+        let head = &url[..idx];
+        if let Some(name) = head.rsplit('/').next()
+            && !name.is_empty()
+        {
+            return name.to_string();
+        }
+    }
+    let trimmed = url.trim_end_matches('/');
+    let last = trimmed.rsplit('/').next().unwrap_or("dep");
+    let stem = last
+        .trim_end_matches(".tar.gz")
+        .trim_end_matches(".tgz")
+        .trim_end_matches(".zip")
+        .trim_end_matches(".git");
+    if stem.is_empty() || stem.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        // Fall back one more segment when last looks like a version
+        let segs: Vec<_> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+        if segs.len() >= 2 {
+            return segs[segs.len() - 2].to_string();
+        }
+    }
+    if stem.is_empty() {
+        "dep".into()
+    } else {
+        stem.to_string()
     }
 }
 
@@ -66,6 +119,7 @@ pub struct ResolvedPackage {
     pub checksum: Option<String>,
     pub git: Option<String>,
     pub path: Option<String>,
+    pub url: Option<String>,
     pub features: Option<Vec<String>>,
     pub default_features: Option<bool>,
 }
@@ -78,48 +132,49 @@ pub fn resolve(
 ) -> Result<ResolvedPackage> {
     match eco {
         Language::Rust => cargo::resolve(spec, features, no_default),
-        other => {
-            if let Some(git) = &spec.git {
-                return Ok(ResolvedPackage {
-                    name: spec.name.clone(),
-                    ecosystem: other.ecosystem().into(),
-                    version: spec.version_req.clone().unwrap_or_else(|| "git".into()),
-                    source: format!("git+{git}"),
-                    checksum: None,
-                    git: Some(git.clone()),
-                    path: None,
-                    features: features.clone(),
-                    default_features: if no_default { Some(false) } else { None },
-                });
-            }
-            if let Some(path) = &spec.path {
-                return Ok(ResolvedPackage {
-                    name: spec.name.clone(),
-                    ecosystem: other.ecosystem().into(),
-                    version: "path".into(),
-                    source: format!("path:{path}"),
-                    checksum: None,
-                    git: None,
-                    path: Some(path.clone()),
-                    features,
-                    default_features: if no_default { Some(false) } else { None },
-                });
-            }
-            // Registry stubs: pin requested version or "*"
-            let ver = spec.version_req.clone().unwrap_or_else(|| "*".into());
-            Ok(ResolvedPackage {
-                name: spec.name.clone(),
-                ecosystem: other.ecosystem().into(),
-                version: ver.clone(),
-                source: format!("{}+{}", other.ecosystem(), spec.name),
-                checksum: None,
-                git: None,
-                path: None,
-                features,
-                default_features: if no_default { Some(false) } else { None },
-            })
+        Language::Nim => nim::resolve(spec, features, no_default),
+        Language::D => dub::resolve(spec, features, no_default),
+        Language::CSharp => nuget::resolve(spec, features, no_default),
+        Language::Zig => zig::resolve(spec, features, no_default),
+        Language::C | Language::Cpp | Language::V | Language::Odin | Language::Hare => {
+            git_path::resolve_path_git_only(eco.ecosystem(), spec, features, no_default)
         }
     }
+}
+
+pub fn search(
+    eco: Language,
+    query: &str,
+    limit: usize,
+) -> Result<SearchOutcome> {
+    match eco {
+        Language::Rust => Ok(SearchOutcome::Hits(cargo::search(query, limit)?)),
+        Language::Nim => Ok(SearchOutcome::Hits(nim::search(query, limit)?)),
+        Language::D => Ok(SearchOutcome::Hits(dub::search(query, limit)?)),
+        Language::CSharp => Ok(SearchOutcome::Hits(nuget::search(query, limit)?)),
+        Language::Zig => {
+            let hits = zig::search(query, limit)?;
+            Ok(SearchOutcome::Hints {
+                note: zig::NO_REGISTRY_MSG.into(),
+                hits,
+            })
+        }
+        Language::C | Language::Cpp | Language::V | Language::Odin | Language::Hare => {
+            Ok(SearchOutcome::Unsupported(git_path::search_unsupported(
+                eco.ecosystem(),
+            )))
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum SearchOutcome {
+    Hits(Vec<(String, String, String)>),
+    Hints {
+        note: String,
+        hits: Vec<(String, String, String)>,
+    },
+    Unsupported(String),
 }
 
 pub fn infer_ecosystem(
@@ -150,4 +205,29 @@ pub fn ensure_packages(pkgs: &[String]) -> Result<()> {
         bail!("no packages specified");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_url_spec() {
+        let s = PackageSpec::parse(
+            "https://github.com/org/pkg/archive/refs/tags/1.0.0.tar.gz",
+        )
+        .unwrap();
+        assert_eq!(s.name, "pkg");
+        assert!(s.url.is_some());
+    }
+
+    #[test]
+    fn parse_git_and_path() {
+        let g = PackageSpec::parse("git+https://github.com/a/b.git").unwrap();
+        assert_eq!(g.name, "b");
+        assert!(g.git.is_some());
+        let p = PackageSpec::parse("path:./vendor/libfoo").unwrap();
+        assert_eq!(p.name, "libfoo");
+        assert_eq!(p.path.as_deref(), Some("./vendor/libfoo"));
+    }
 }

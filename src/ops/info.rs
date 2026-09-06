@@ -18,6 +18,9 @@ pub fn run(args: &InfoArgs, g: &Globals) -> Result<u8> {
         if let Some(path) = &dep.path {
             println!("path:       {path}");
         }
+        if let Some(url) = &dep.url {
+            println!("url:        {url}");
+        }
         println!("expose:     {}", dep.expose);
         if let Some(out) = dep.expose_opts.as_ref().and_then(|o| o.out.as_ref()) {
             println!("expose.out: {out}");
@@ -41,6 +44,15 @@ pub fn run(args: &InfoArgs, g: &Globals) -> Result<u8> {
     println!("ecosystem: {}", resolved.ecosystem);
     println!("version:   {}", resolved.version);
     println!("source:    {}", resolved.source);
+    if let Some(git) = &resolved.git {
+        println!("git:       {git}");
+    }
+    if let Some(path) = &resolved.path {
+        println!("path:      {path}");
+    }
+    if let Some(url) = &resolved.url {
+        println!("url:       {url}");
+    }
     if let Some(c) = resolved.checksum {
         println!("checksum:  {c}");
     }

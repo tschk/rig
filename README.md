@@ -64,9 +64,19 @@ Aliases: `rm`, `ui`, `uninstall`.
 ```bash
 rig ls
 rig s serde
+rig search --nim jester
+rig search --d vibe
+rig search --csharp Newtonsoft.Json
+rig search --zig http          # GitHub hints; no central Zig registry
+rig search --c foo             # clear unsupported (use path:/git+)
 rig show rx4
+rig info --nim jester
 rig outdated
 ```
+
+Registry-backed today: **cargo** (crates.io), **nim** (nimble packages.json), **d** (code.dlang.org), **csharp** (NuGet).
+**zig** accepts `path:` / `git+` / `https://` pins (search is hint-only).
+**c / cpp / v / odin / hare** are path/git pins only.
 
 ## LOCK / SYNC
 

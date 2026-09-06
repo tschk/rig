@@ -1,3 +1,4 @@
+use super::http::{agent, urlencoding_lite};
 use super::{PackageSpec, ResolvedPackage};
 use anyhow::{Context, Result};
 
@@ -16,6 +17,7 @@ pub fn resolve(
             checksum: None,
             git: None,
             path: Some(path.clone()),
+            url: None,
             features,
             default_features: if no_default { Some(false) } else { None },
         });
@@ -29,6 +31,7 @@ pub fn resolve(
             checksum: None,
             git: Some(git.clone()),
             path: None,
+            url: None,
             features,
             default_features: if no_default { Some(false) } else { None },
         });
@@ -64,6 +67,7 @@ pub fn resolve(
                     checksum: None,
                     git: Some(git),
                     path: None,
+                    url: None,
                     features,
                     default_features: if no_default { Some(false) } else { None },
                 })
@@ -80,10 +84,7 @@ fn crate_name_for(spec: &PackageSpec) -> String {
 
 fn fetch_crates_io(name: &str, version_req: Option<&str>) -> Result<ResolvedPackage> {
     let url = format!("https://crates.io/api/v1/crates/{name}");
-    let agent = ureq::AgentBuilder::new()
-        .user_agent("rig/0.1 (+https://github.com/tschk/rig)")
-        .build();
-    let resp = agent
+    let resp = agent()
         .get(&url)
         .call()
         .with_context(|| format!("GET {url}"))?;
@@ -122,6 +123,7 @@ fn fetch_crates_io(name: &str, version_req: Option<&str>) -> Result<ResolvedPack
         checksum,
         git: None,
         path: None,
+        url: None,
         features: None,
         default_features: None,
     })
@@ -173,10 +175,7 @@ pub fn search(query: &str, limit: usize) -> Result<Vec<(String, String, String)>
         urlencoding_lite(query),
         limit
     );
-    let agent = ureq::AgentBuilder::new()
-        .user_agent("rig/0.1 (+https://github.com/tschk/rig)")
-        .build();
-    let resp = agent
+    let resp = agent()
         .get(&url)
         .call()
         .with_context(|| format!("GET {url}"))?;
@@ -206,16 +205,6 @@ pub fn search(query: &str, limit: usize) -> Result<Vec<(String, String, String)>
     Ok(out)
 }
 
-fn urlencoding_lite(s: &str) -> String {
-    s.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
-}
 
 pub fn latest_version(name: &str) -> Result<String> {
     let r = fetch_crates_io(name, None)?;
