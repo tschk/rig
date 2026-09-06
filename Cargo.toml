@@ -1,0 +1,41 @@
+[package]
+name = "rig"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "ISC"
+description = "Cross-lang native dependency manager with equilibrium-ffi auto-expose"
+repository = "https://github.com/tschk/rig"
+homepage = "https://github.com/tschk/rig"
+readme = "README.md"
+keywords = ["ffi", "polyglot", "package-manager", "equilibrium", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "rig"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+toml_edit = "0.22"
+thiserror = "2"
+ureq = { version = "2", features = ["json"] }
+semver = "1"
+walkdir = "2"
+sha2 = "0.10"
+hex = "0.4"
+dirs = "6"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+
+[features]
+default = []
+# Optional heavier integration (network / toolchains)
+tools = []

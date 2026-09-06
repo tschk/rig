@@ -1,0 +1,8 @@
+/target
+.rig/cache
+.rig/expose-stamp
+.DS_Store
+*.swp
+.idea/
+.vscode/
+.rig-agent/

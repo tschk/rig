@@ -1,0 +1,35 @@
+# rig.toml — example schema (DESIGN §2)
+schema_version = 1
+
+[host]
+# Detected or set by `rig init`. Drives default expose consumer language.
+language = "rust"
+# manifest = "Cargo.toml"
+# root = "."
+
+[package]
+name = "example"
+version = "0.0.0"
+
+# Dependencies keyed by package id as used on the CLI.
+
+[dependencies.rx4]
+ecosystem = "cargo"
+version = "0.7.1"
+# git = "https://github.com/tschk/rotary"  # optional override
+features = ["builtin-tools"]
+default_features = false
+expose = true
+
+[dependencies.rx4.expose_opts]
+consumer = "rust"
+out = "src/rig_bindings/rx4.rs"
+crate_types = ["cdylib", "rlib"]
+native = "target/rig/rx4"
+
+[expose]
+enabled = true
+# Default for Rust-host re-exports. Override to "src/vendor" for Zig/C imports.
+dir = "src/rig_bindings"
+cache = ".rig/cache"
+build_dir = "target/rig"
