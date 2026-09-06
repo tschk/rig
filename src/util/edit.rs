@@ -117,8 +117,16 @@ pub fn cargo_remove_dep(cargo_toml: &Path, name: &str) -> Result<bool> {
     Ok(removed)
 }
 
-/// Idempotent build.zig patch markers.
-pub fn patch_build_zig_link(build_zig: &Path, pkg: &str, lib_hint: &str) -> Result<()> {
+/// Idempotent build.zig patch: link the rig-built cdylib (Zig 0.14+ / 0.16 API).
+///
+/// Inserts markers and wires `root_module.addLibraryPath` + `linkSystemLibrary`
+/// + `addRPath` + `addIncludePath` for the façade under `lib_hint`.
+pub fn patch_build_zig_link(
+    build_zig: &Path,
+    pkg: &str,
+    lib_hint: &str,
+    lib_name: &str,
+) -> Result<()> {
     const BEGIN: &str = "// rig-expose-begin";
     const END: &str = "// rig-expose-end";
     let mut text = if build_zig.is_file() {
@@ -127,15 +135,24 @@ pub fn patch_build_zig_link(build_zig: &Path, pkg: &str, lib_hint: &str) -> Resu
         String::new()
     };
     let block = format!(
-        "{BEGIN}\n// rig: link {pkg} native lib (path hint: {lib_hint})\n// Add: exe.addLibraryPath / exe.linkSystemLibrary as appropriate for your Zig version.\n{END}\n"
+        "    {begin}\n    // rig: link `{pkg}` façade `{lib_name}` from {lib_hint}\n    exe.root_module.addLibraryPath(b.path(\"{lib_hint}\"));\n    exe.root_module.addRPath(b.path(\"{lib_hint}\"));\n    exe.root_module.addIncludePath(b.path(\"{lib_hint}\"));\n    exe.root_module.linkSystemLibrary(\"{lib_name}\", .{{}});\n    {end}\n",
+        begin = BEGIN,
+        end = END,
     );
-    if text.contains(BEGIN) {
-        // replace region
+
+    // Only treat as already-patched when BOTH markers exist as whole lines.
+    let has_region =
+        text.lines().any(|l| l.trim() == BEGIN) && text.lines().any(|l| l.trim() == END);
+    if has_region {
         if let (Some(s), Some(e)) = (text.find(BEGIN), text.find(END)) {
+            // Expand to start of line for BEGIN
+            let s = text[..s].rfind('\n').map(|i| i + 1).unwrap_or(0);
             let end = e + END.len();
             text.replace_range(s..end, block.trim_end());
             text.push('\n');
         }
+    } else if let Some(idx) = text.find("b.installArtifact(exe);") {
+        text.insert_str(idx, &format!("\n{block}\n    "));
     } else {
         text.push('\n');
         text.push_str(&block);

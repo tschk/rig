@@ -1,4 +1,6 @@
+pub mod native;
 pub mod rust_host;
+pub mod shim;
 pub mod stamp;
 pub mod zig_host;
 
@@ -24,7 +26,7 @@ pub fn resync_all(ctx: &AppCtx) -> Result<Vec<ExposeResult>> {
         if !dep.expose {
             continue;
         }
-        if let Some(r) = expose_one(ctx, name, dep)? {
+        if let Some(r) = expose_one(ctx, name, dep, None)? {
             outs.push(r);
         }
     }
@@ -41,13 +43,18 @@ pub fn expose_resolved(
     if !ctx.manifest.expose.enabled || !dep.expose {
         return Ok(None);
     }
-    let r = expose_one(ctx, &resolved.name, dep)?;
+    let r = expose_one(ctx, &resolved.name, dep, Some(resolved))?;
     write_mod_rs(ctx)?;
     stamp::write_stamp(ctx)?;
     Ok(r)
 }
 
-fn expose_one(ctx: &AppCtx, name: &str, dep: &Dependency) -> Result<Option<ExposeResult>> {
+fn expose_one(
+    ctx: &AppCtx,
+    name: &str,
+    dep: &Dependency,
+    resolved: Option<&ResolvedPackage>,
+) -> Result<Option<ExposeResult>> {
     let host = ctx.host.language;
     let consumer = dep
         .expose_opts
@@ -72,15 +79,36 @@ fn expose_one(ctx: &AppCtx, name: &str, dep: &Dependency) -> Result<Option<Expos
             crate::util::edit::ensure_rust_mod_decl(&ctx.root)?;
         }
         (Language::Zig, "cargo") => {
-            zig_host::write_zig_bindings_stub(&out_path, name, dep)?;
+            // Real C ABI: generate shim cdylib, build it, emit Zig imports.
+            let built = native::build_cargo_cdylib(ctx, name, resolved, dep)?;
+            let native_rel = dep
+                .expose_opts
+                .as_ref()
+                .and_then(|o| o.native.clone())
+                .unwrap_or_else(|| format!("{}/{}", ctx.manifest.expose.build_dir, name));
+            zig_host::write_zig_bindings(
+                &out_path,
+                name,
+                dep,
+                Some(&built.artifacts.header),
+                &built.artifacts.lib_name,
+                &native_rel,
+            )?;
+            // Also copy header next to bindings for @cImport consumers.
+            if let Some(parent) = out_path.parent() {
+                let _ = std::fs::copy(
+                    &built.artifacts.header,
+                    parent.join(built.artifacts.header.file_name().unwrap()),
+                );
+            }
             let build_zig = ctx.root.join("build.zig");
             if build_zig.exists() {
-                let native = dep
-                    .expose_opts
-                    .as_ref()
-                    .and_then(|o| o.native.clone())
-                    .unwrap_or_else(|| format!("{}/{}", ctx.manifest.expose.build_dir, name));
-                crate::util::edit::patch_build_zig_link(&build_zig, name, &native)?;
+                crate::util::edit::patch_build_zig_link(
+                    &build_zig,
+                    name,
+                    &native_rel,
+                    &built.artifacts.lib_name,
+                )?;
             }
         }
         (Language::Rust, eco) if eco != "cargo" => {
@@ -88,7 +116,6 @@ fn expose_one(ctx: &AppCtx, name: &str, dep: &Dependency) -> Result<Option<Expos
             crate::util::edit::ensure_rust_mod_decl(&ctx.root)?;
         }
         _ => {
-            // Generic stub documenting the path
             rust_host::write_generic_stub(&out_path, name, dep, consumer)?;
         }
     }
@@ -157,6 +184,14 @@ pub fn remove_expose_artifacts(ctx: &AppCtx, name: &str) -> Result<()> {
         if p2.exists() {
             let _ = std::fs::remove_file(&p2);
         }
+    }
+    let shim = shim::shim_dir(ctx, name);
+    if shim.exists() {
+        let _ = std::fs::remove_dir_all(&shim);
+    }
+    let native = shim::native_out_dir(ctx, name);
+    if native.exists() {
+        let _ = std::fs::remove_dir_all(&native);
     }
     write_mod_rs(ctx)?;
     stamp::write_stamp(ctx)?;

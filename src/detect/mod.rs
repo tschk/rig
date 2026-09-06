@@ -105,24 +105,43 @@ pub fn detect_host(start: &Path) -> Result<DetectedHost> {
         });
     }
 
-    let root = find_project_root(start);
-    if let Some((lang, marker)) = detect_markers(&root) {
+    // Prefer the cwd itself so nested examples (e.g. examples/zig-host-rx4 with
+    // build.zig inside a Rust repo) are not swallowed by the parent Cargo.toml.
+    if let Some((lang, marker)) = detect_markers(start) {
         return Ok(DetectedHost {
             language: lang,
-            root,
+            root: start.to_path_buf(),
             marker: Some(marker),
         });
     }
-    if let Some(lang) = census_extensions(&root) {
+    if let Some(lang) = census_extensions(start) {
         return Ok(DetectedHost {
             language: lang,
-            root,
+            root: start.to_path_buf(),
             marker: None,
         });
     }
+
+    let root = find_project_root(start);
+    if root != start {
+        if let Some((lang, marker)) = detect_markers(&root) {
+            return Ok(DetectedHost {
+                language: lang,
+                root,
+                marker: Some(marker),
+            });
+        }
+        if let Some(lang) = census_extensions(&root) {
+            return Ok(DetectedHost {
+                language: lang,
+                root,
+                marker: None,
+            });
+        }
+    }
     bail!(
         "could not detect host language in {} — pass --host or set RIG_HOST_LANG",
-        root.display()
+        start.display()
     )
 }
 
@@ -287,6 +306,17 @@ mod tests {
         let d = tempdir().unwrap();
         fs::write(d.path().join("build.zig"), "").unwrap();
         let h = detect_host(d.path()).unwrap();
+        assert_eq!(h.language, Language::Zig);
+    }
+
+    #[test]
+    fn prefers_cwd_zig_over_parent_cargo() {
+        let d = tempdir().unwrap();
+        fs::write(d.path().join("Cargo.toml"), "[package]\nname=\"parent\"\n").unwrap();
+        let nested = d.path().join("examples/zig-host");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("build.zig"), "").unwrap();
+        let h = detect_host(&nested).unwrap();
         assert_eq!(h.language, Language::Zig);
     }
 
