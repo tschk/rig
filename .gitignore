@@ -6,3 +6,7 @@
 .idea/
 .vscode/
 .rig-agent/
+
+# Internal / agent-only (not public copy)
+DESIGN.md
+.rig-internal/

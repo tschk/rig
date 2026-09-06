@@ -9,4 +9,4 @@ rig add --rust rx4
 zig build
 ```
 
-Full fx-fork demo TBD once `rx4` ships a stable C ABI / cdylib façade.
+Full ABI demo TBD once `rx4` ships a stable C ABI / cdylib façade.

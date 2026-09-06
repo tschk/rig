@@ -1,6 +1,6 @@
 # rig
 
-Cross-lang native deps. [equilibrium-ffi](https://github.com/tschk/equilibrium) expose. one manifest.
+Cross-language native dependency manager. Detect host lang, add libs via CLI, expose them in-process with [equilibrium-ffi](https://github.com/tschk/equilibrium).
 
 ```text
 rig add --rust rx4
@@ -9,7 +9,7 @@ rig ui rx4
 rig dr
 ```
 
-Host/embed pattern: [telekinesis](https://telekinesis.tsc.hk) hosts; [rotary](https://github.com/tschk/rotary) (`rx4`) owns the loop.
+Host projects consume native libs in-process; [rotary](https://github.com/tschk/rotary) (`rx4`) is a common Rust dep to expose into non-Rust hosts.
 
 ## Install
 
@@ -33,7 +33,7 @@ rig i --cargo rx4
 rig add --zig some_lib
 ```
 
-Aliases: `i`, `install`.
+Aliases: `i`, `install` (short package-manager aliases).
 
 Resolves the package, pins it in `rig.toml` / `rig.lock`, and **auto-exposes** a native in-process surface:
 
@@ -83,6 +83,17 @@ rig check --fix --full
 rig build
 ```
 
+## Zig host demo
+
+See [`examples/zig-host-rx4`](examples/zig-host-rx4) — Zig host that exposes Rust `rx4` via equilibrium-ffi.
+
+```bash
+cd examples/zig-host-rx4
+rig init
+rig add --rust rx4
+zig build
+```
+
 ## Manifest
 
 See committed example [`rig.toml`](rig.toml). Schema:
@@ -109,16 +120,10 @@ Lockfile: `rig.lock` (commit it).
 
 Equilibrium-supported set: V, Zig, C, C++, C#, Rust, D, Nim, Odin, Hare.
 
-## vs fx
-
-[fx](https://github.com/vercel-labs/fx) is a Zig coding agent. `rig` is the **polyglot native dependency manager** that can expose Rust crates like `rx4` into a Zig host (or the reverse) via equilibrium-ffi — project-local, not a system package manager (see [wax](https://github.com/tschk) for Homebrew-compat).
-
 ## Links
 
 - [equilibrium](https://github.com/tschk/equilibrium)
 - [rotary / rx4](https://github.com/tschk/rotary)
-- [telekinesis](https://telekinesis.tsc.hk)
-- Design: [`DESIGN.md`](DESIGN.md)
 
 ## License
 
