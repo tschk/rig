@@ -1,5 +1,5 @@
 [package]
-name = "rig"
+name = "rigpkg"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
@@ -10,6 +10,10 @@ homepage = "https://github.com/tschk/rig"
 readme = "README.md"
 keywords = ["ffi", "polyglot", "package-manager", "equilibrium", "cli"]
 categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+name = "rig"
+path = "src/lib.rs"
 
 [[bin]]
 name = "rig"

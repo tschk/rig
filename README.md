@@ -14,8 +14,16 @@ Host projects consume native libs in-process; [rotary](https://github.com/tschk/
 ## Install
 
 ```bash
+cargo install rigpkg
+```
+
+Or from git:
+
+```bash
 cargo install --git https://github.com/tschk/rig
 ```
+
+Both install the `rig` binary.
 
 ## INIT
 
