@@ -50,6 +50,7 @@ Resolves the package, pins it in `rig.toml` / `rig.lock`, and **auto-exposes** a
 - **Nim host ← cargo crate:** builds the same façade and writes `src/rig_bindings/<pkg>.nim` (`importc` + `passL` link hints).
 - **C/C++ host ← cargo crate:** builds the same façade and writes `src/rig_bindings/<pkg>.h` (declarations + `-L/-l` metadata macros).
 - **C# host ← cargo crate:** builds the same façade and writes `src/rig_bindings/<pkg>.cs` (`DllImport` P/Invoke wrappers).
+- **D host ← cargo crate:** builds the same façade and writes `src/rig_bindings/<pkg>.d` (`extern(C)` + `pragma(lib)`).
 - **Rust host ← foreign lang:** generates an equilibrium-ffi `load` path stub.
 
 Ecosystem flags (mutually exclusive): `--cargo`/`--rust`, `--zig`, `--nim`, `--c`, `--cpp`, `--v`, `--d`, `--odin`, `--hare`, `--csharp`/`--cs`.

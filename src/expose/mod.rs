@@ -1,5 +1,6 @@
 pub mod c_host;
 pub mod csharp_host;
+pub mod d_host;
 pub mod native;
 pub mod nim_host;
 pub mod rust_host;
@@ -171,6 +172,21 @@ fn expose_one(
                 &built.artifacts.lib_name,
                 &native_rel,
             )?;
+            if let Some(parent) = out_path.parent() {
+                let _ = std::fs::copy(
+                    &built.artifacts.header,
+                    parent.join(built.artifacts.header.file_name().unwrap()),
+                );
+            }
+        }
+        (Language::D, "cargo") => {
+            let built = native::build_cargo_cdylib(ctx, name, resolved, dep)?;
+            let native_rel = dep
+                .expose_opts
+                .as_ref()
+                .and_then(|o| o.native.clone())
+                .unwrap_or_else(|| format!("{}/{}", ctx.manifest.expose.build_dir, name));
+            d_host::write_d_bindings(&out_path, name, dep, &built.artifacts.lib_name, &native_rel)?;
             if let Some(parent) = out_path.parent() {
                 let _ = std::fs::copy(
                     &built.artifacts.header,
