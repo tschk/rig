@@ -379,8 +379,14 @@ fn add_path_hare_missing_toolchain_is_honest() {
 }
 
 fn toolchain_ok(bin: &str) -> bool {
+    // Odin uses `odin version` (no --version).
+    let args: &[&str] = if bin == "odin" {
+        &["version"]
+    } else {
+        &["--version"]
+    };
     std::process::Command::new(bin)
-        .arg("--version")
+        .args(args)
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -620,4 +626,57 @@ fn nim_host_path_c_emits_header_procs_when_nim_present() {
         text.contains("proc flatlib_add*"),
         "expected discovered C prototype in nim binder:\n{text}"
     );
+}
+
+#[test]
+fn odin_host_path_c_emits_header_procs_when_odin_present() {
+    if !toolchain_ok("odin") {
+        eprintln!("skip: odin not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("ols.json"), "{}\n").unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("src/main.odin"),
+        "package main\nmain :: proc() {}\n",
+    )
+    .unwrap();
+
+    let vendor = dir.path().join("vendor/flatlib");
+    std::fs::create_dir_all(&vendor).unwrap();
+    std::fs::write(
+        vendor.join("flatlib.h"),
+        "#pragma once\nint flatlib_add(int a, int b);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        vendor.join("flatlib.c"),
+        "#include \"flatlib.h\"\nint flatlib_add(int a, int b) { return a + b; }\n",
+    )
+    .unwrap();
+
+    rig()
+        .current_dir(dir.path())
+        .args(["init"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("host: odin"));
+
+    let path_spec = format!("path:{}", vendor.display());
+    rig()
+        .current_dir(dir.path())
+        .args(["add", "--c", &path_spec])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("added"));
+
+    let binding = dir.path().join("src/rig_bindings/flatlib.odin");
+    assert!(binding.is_file(), "expected odin path binding");
+    let text = std::fs::read_to_string(&binding).unwrap();
+    assert!(
+        text.contains("flatlib_add"),
+        "expected discovered C prototype in odin binder:\n{text}"
+    );
+    assert!(text.contains("foreign rig_lib"), "{text}");
 }

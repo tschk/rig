@@ -11,15 +11,32 @@ pub fn scan_header_text(text: &str) -> Vec<ExportFn> {
     let mut out = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     let stripped = strip_c_comments(text);
+    let mut buf = String::new();
     for raw_line in stripped.lines() {
         let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
+        if line.is_empty() {
             continue;
         }
-        if let Some(export) = parse_prototype_line(line)
-            && seen.insert(export.export_name.clone())
-        {
-            out.push(export);
+        if buf.is_empty() && line.starts_with('#') {
+            continue;
+        }
+        if !buf.is_empty() {
+            buf.push(' ');
+        }
+        buf.push_str(line);
+        if buf.contains(';') {
+            let stmt = std::mem::take(&mut buf);
+            for part in stmt.split(';') {
+                let part = part.trim();
+                if part.is_empty() {
+                    continue;
+                }
+                if let Some(export) = parse_prototype_line(part)
+                    && seen.insert(export.export_name.clone())
+                {
+                    out.push(export);
+                }
+            }
         }
     }
     out
@@ -315,12 +332,17 @@ mod tests {
 int flatlib_add(int a, int b);
 const char *flatlib_name(void);
 void flatlib_touch(uint8_t *data, size_t len);
+int flatlib_scale(
+    int value,
+    int factor
+);
 "#;
         let exports = scan_header_text(hdr);
         let names: Vec<_> = exports.iter().map(|e| e.export_name.as_str()).collect();
         assert!(names.contains(&"flatlib_add"), "{names:?}");
         assert!(names.contains(&"flatlib_name"), "{names:?}");
         assert!(names.contains(&"flatlib_touch"), "{names:?}");
+        assert!(names.contains(&"flatlib_scale"), "{names:?}");
         let add = exports
             .iter()
             .find(|e| e.export_name == "flatlib_add")
