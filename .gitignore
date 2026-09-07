@@ -19,3 +19,5 @@ examples/**/rig.toml
 examples/**/rig.lock
 examples/**/src/rig_bindings/
 examples/**/.rig/
+examples/**/main
+examples/c-host-sha2/main

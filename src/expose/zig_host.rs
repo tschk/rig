@@ -69,6 +69,14 @@ pub fn write_zig_bindings(
                  pub extern \"c\" fn rx4_prompt_smoke(agent: ?*anyopaque, prompt: [*:0]const u8) i32;\n",
             );
         }
+        "sha2" => {
+            body.push_str(
+                "pub extern \"c\" fn sha2_abi_version() u32;\n\
+                 pub extern \"c\" fn sha2_version() [*:0]const u8;\n\
+                 pub extern \"c\" fn sha2_name() [*:0]const u8;\n\
+                 pub extern \"c\" fn sha2_hash_256(data: [*]const u8, len: usize, out: *[32]u8) i32;\n",
+            );
+        }
         _ => {
             let safe = name.replace('-', "_");
             body.push_str(&format!(

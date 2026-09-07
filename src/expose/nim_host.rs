@@ -43,6 +43,13 @@ pub fn write_nim_bindings(
              proc rx4_prompt_smoke*(agent: pointer; prompt: cstring): cint {.importc, cdecl.}\n",
         );
     }
+    if name == "sha2" {
+        body.push_str(
+            "\n\
+             # sha2 enrichment (ABI 2)\n\
+             proc sha2_hash_256*(data: ptr uint8; len: csize_t; out: ptr uint8): cint {.importc, cdecl.}\n",
+        );
+    }
 
     std::fs::write(out, body).with_context(|| format!("write {}", out.display()))?;
     Ok(())
