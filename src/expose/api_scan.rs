@@ -192,6 +192,78 @@ impl FfiType {
         }
     }
 
+    pub fn v_ty(&self) -> String {
+        match self {
+            Self::Void => "".into(),
+            Self::U8 => "u8".into(),
+            Self::U16 => "u16".into(),
+            Self::U32 => "u32".into(),
+            Self::U64 => "u64".into(),
+            Self::Usize => "usize".into(),
+            Self::I8 => "i8".into(),
+            Self::I16 => "i16".into(),
+            Self::I32 => "int".into(),
+            Self::I64 => "i64".into(),
+            Self::Isize => "isize".into(),
+            Self::F32 => "f32".into(),
+            Self::F64 => "f64".into(),
+            Self::Bool => "bool".into(),
+            Self::ConstCChar | Self::MutCChar => "&char".into(),
+            Self::ConstVoid | Self::MutVoid => "voidptr".into(),
+            Self::ConstPtr(inner) | Self::MutPtr(inner) => format!("&{}", inner.v_ty()),
+        }
+    }
+
+    pub fn odin_ty(&self) -> String {
+        match self {
+            Self::Void => "".into(),
+            Self::U8 => "u8".into(),
+            Self::U16 => "u16".into(),
+            Self::U32 => "u32".into(),
+            Self::U64 => "u64".into(),
+            Self::Usize => "uint".into(),
+            Self::I8 => "i8".into(),
+            Self::I16 => "i16".into(),
+            Self::I32 => "i32".into(),
+            Self::I64 => "i64".into(),
+            Self::Isize => "int".into(),
+            Self::F32 => "f32".into(),
+            Self::F64 => "f64".into(),
+            Self::Bool => "bool".into(),
+            Self::ConstCChar => "cstring".into(),
+            Self::MutCChar => "cstring".into(),
+            Self::ConstVoid => "rawptr".into(),
+            Self::MutVoid => "rawptr".into(),
+            Self::ConstPtr(inner) => format!("^{}", inner.odin_ty()),
+            Self::MutPtr(inner) => format!("^{}", inner.odin_ty()),
+        }
+    }
+
+    pub fn hare_ty(&self) -> String {
+        match self {
+            Self::Void => "void".into(),
+            Self::U8 => "u8".into(),
+            Self::U16 => "u16".into(),
+            Self::U32 => "u32".into(),
+            Self::U64 => "u64".into(),
+            Self::Usize => "size".into(),
+            Self::I8 => "i8".into(),
+            Self::I16 => "i16".into(),
+            Self::I32 => "i32".into(),
+            Self::I64 => "i64".into(),
+            Self::Isize => "size".into(),
+            Self::F32 => "f32".into(),
+            Self::F64 => "f64".into(),
+            Self::Bool => "bool".into(),
+            Self::ConstCChar => "*const char".into(),
+            Self::MutCChar => "*char".into(),
+            Self::ConstVoid => "*const void".into(),
+            Self::MutVoid => "*void".into(),
+            Self::ConstPtr(inner) => format!("*const {}", inner.hare_ty()),
+            Self::MutPtr(inner) => format!("*{}", inner.hare_ty()),
+        }
+    }
+
     pub fn needs_stddef(&self) -> bool {
         matches!(self, Self::Usize | Self::Isize)
             || matches!(self, Self::ConstPtr(inner) | Self::MutPtr(inner) if inner.needs_stddef())
@@ -434,20 +506,19 @@ fn collect_root_api_names(crate_root: &Path) -> BTreeSet<String> {
     if let Ok(text) = std::fs::read_to_string(crate_root.join("src/lib.rs")) {
         for line in text.lines() {
             let t = line.trim();
-            if t.starts_with("pub fn")
+            if (t.starts_with("pub fn")
                 || t.starts_with("pub const fn")
                 || t.starts_with("pub unsafe fn")
                 || t.starts_with("pub extern")
-                || t.starts_with("pub unsafe extern")
+                || t.starts_with("pub unsafe extern"))
+                && let Some(rest) = t.split("fn ").nth(1)
             {
-                if let Some(rest) = t.split("fn ").nth(1) {
-                    let name: String = rest
-                        .chars()
-                        .take_while(|c| c.is_alphanumeric() || *c == '_')
-                        .collect();
-                    if !name.is_empty() {
-                        names.insert(name);
-                    }
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() {
+                    names.insert(name);
                 }
             }
         }
@@ -532,10 +603,9 @@ fn scan_file_text(
                 }
                 if let Some(export) =
                     classify_signature(&sig, crate_safe, prev_attrs_no_mangle, report)
+                    && seen.insert(export.export_name.clone())
                 {
-                    if seen.insert(export.export_name.clone()) {
-                        report.exports.push(export);
-                    }
+                    report.exports.push(export);
                 }
                 // Account braces on continuation lines before the final line.
                 while i < j {
@@ -733,10 +803,10 @@ pub fn locate_or_fetch_sources(
     path_hint: Option<&Path>,
     cache_dir: &Path,
 ) -> Option<PathBuf> {
-    if let Some(p) = path_hint {
-        if p.join("Cargo.toml").is_file() {
-            return Some(p.to_path_buf());
-        }
+    if let Some(p) = path_hint
+        && p.join("Cargo.toml").is_file()
+    {
+        return Some(p.to_path_buf());
     }
     if version == "*" || version == "git" || version == "path" {
         return None;

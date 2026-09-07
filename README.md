@@ -51,6 +51,10 @@ Resolves the package, pins it in `rig.toml` / `rig.lock`, and **auto-exposes** a
 - **C/C++ host ← cargo crate:** builds the same façade and writes `src/rig_bindings/<pkg>.h` (declarations + `-L/-l` metadata macros).
 - **C# host ← cargo crate:** builds the same façade and writes `src/rig_bindings/<pkg>.cs` (`DllImport` P/Invoke wrappers).
 - **D host ← cargo crate:** builds the same façade and writes `src/rig_bindings/<pkg>.d` (`extern(C)` + `pragma(lib)`).
+- **V host ← cargo crate:** builds the same façade and writes `src/rig_bindings/<pkg>.v` (`#flag` + `fn C.…`).
+- **Odin host ← cargo crate:** builds the same façade and writes `src/rig_bindings/<pkg>.odin` (`foreign import` + `foreign` block).
+- **Hare host ← cargo crate:** builds the same façade and writes `src/rig_bindings/<pkg>.ha` (`@symbol` C ABI decls + `-L/-l` hints).
+- **C/C++/Zig host ← path/git c|cpp|zig:** compiles sources into `target/rig/<pkg>/lib*_native.{dylib,so}` when feasible (flat `.c/.cpp/.zig` or Makefile `$OUT`); clear error otherwise.
 - **Rust host ← foreign lang:** generates an equilibrium-ffi `load` path stub.
 
 Ecosystem flags (mutually exclusive): `--cargo`/`--rust`, `--zig`, `--nim`, `--c`, `--cpp`, `--v`, `--d`, `--odin`, `--hare`, `--csharp`/`--cs`.

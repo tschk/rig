@@ -194,3 +194,65 @@ pub fn emit_rust_wrappers(exports: &[ExportFn]) -> String {
     }
     out
 }
+
+pub fn emit_v_fns(exports: &[ExportFn]) -> String {
+    let mut out = String::new();
+    for e in exports {
+        let params = e
+            .params
+            .iter()
+            .map(|p| format!("{} {}", p.ty.v_ty(), p.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ret = match &e.ret {
+            FfiType::Void => String::new(),
+            t => format!(" {}", t.v_ty()),
+        };
+        out.push_str(&format!(
+            "fn C.{}({params}){ret}
+",
+            e.export_name
+        ));
+    }
+    out
+}
+
+pub fn emit_odin_foreigns(exports: &[ExportFn]) -> String {
+    let mut out = String::new();
+    for e in exports {
+        let params = e
+            .params
+            .iter()
+            .map(|p| format!("{}: {}", p.name, p.ty.odin_ty()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ret = match &e.ret {
+            FfiType::Void => String::new(),
+            t => format!(" -> {}", t.odin_ty()),
+        };
+        out.push_str(&format!(
+            "	{} :: proc({params}){ret} ---
+",
+            e.export_name
+        ));
+    }
+    out
+}
+
+pub fn emit_hare_fns(exports: &[ExportFn]) -> String {
+    let mut out = String::new();
+    for e in exports {
+        let params = e
+            .params
+            .iter()
+            .map(|p| format!("{}: {}", p.name, p.ty.hare_ty()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ret = e.ret.hare_ty();
+        out.push_str(&format!(
+            "export @symbol(\"{}\") fn {}({params}) {ret};\n",
+            e.export_name, e.export_name
+        ));
+    }
+    out
+}

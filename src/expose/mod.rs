@@ -3,18 +3,22 @@ pub mod surface;
 pub mod c_host;
 pub mod csharp_host;
 pub mod d_host;
+pub mod hare_host;
 pub mod native;
 pub mod nim_host;
+pub mod odin_host;
+pub mod path_native;
 pub mod rust_host;
 pub mod shim;
 pub mod stamp;
+pub mod v_host;
 pub mod zig_host;
 
 use crate::detect::Language;
 use crate::manifest::{Dependency, Manifest};
 use crate::resolve::ResolvedPackage;
 use crate::util::AppCtx;
-use anyhow::Result;
+use anyhow::{Result, bail};
 use std::path::PathBuf;
 
 pub struct ExposeResult {
@@ -85,7 +89,6 @@ fn expose_one(
             crate::util::edit::ensure_rust_mod_decl(&ctx.root)?;
         }
         (Language::Zig, "cargo") => {
-            // Real C ABI: generate shim cdylib, build it, emit Zig imports.
             let built = native::build_cargo_cdylib(ctx, name, resolved, dep)?;
             let native_rel = dep
                 .expose_opts
@@ -101,7 +104,6 @@ fn expose_one(
                 &native_rel,
                 &built.artifacts.exports,
             )?;
-            // Also copy header next to bindings for @cImport consumers.
             if let Some(parent) = out_path.parent() {
                 let _ = std::fs::copy(
                     &built.artifacts.header,
@@ -120,11 +122,7 @@ fn expose_one(
         }
         (Language::Nim, "cargo") => {
             let built = native::build_cargo_cdylib(ctx, name, resolved, dep)?;
-            let native_rel = dep
-                .expose_opts
-                .as_ref()
-                .and_then(|o| o.native.clone())
-                .unwrap_or_else(|| format!("{}/{}", ctx.manifest.expose.build_dir, name));
+            let native_rel = native_rel_for(ctx, name, dep);
             nim_host::write_nim_bindings(
                 &out_path,
                 name,
@@ -133,20 +131,11 @@ fn expose_one(
                 &native_rel,
                 &built.artifacts.exports,
             )?;
-            if let Some(parent) = out_path.parent() {
-                let _ = std::fs::copy(
-                    &built.artifacts.header,
-                    parent.join(built.artifacts.header.file_name().unwrap()),
-                );
-            }
+            copy_header_beside(&out_path, &built.artifacts.header);
         }
         (Language::C | Language::Cpp, "cargo") => {
             let built = native::build_cargo_cdylib(ctx, name, resolved, dep)?;
-            let native_rel = dep
-                .expose_opts
-                .as_ref()
-                .and_then(|o| o.native.clone())
-                .unwrap_or_else(|| format!("{}/{}", ctx.manifest.expose.build_dir, name));
+            let native_rel = native_rel_for(ctx, name, dep);
             c_host::write_c_bindings(
                 &out_path,
                 name,
@@ -155,20 +144,11 @@ fn expose_one(
                 &built.artifacts.lib_name,
                 &native_rel,
             )?;
-            if let Some(parent) = out_path.parent() {
-                let _ = std::fs::copy(
-                    &built.artifacts.header,
-                    parent.join(built.artifacts.header.file_name().unwrap()),
-                );
-            }
+            copy_header_beside(&out_path, &built.artifacts.header);
         }
         (Language::CSharp, "cargo") => {
             let built = native::build_cargo_cdylib(ctx, name, resolved, dep)?;
-            let native_rel = dep
-                .expose_opts
-                .as_ref()
-                .and_then(|o| o.native.clone())
-                .unwrap_or_else(|| format!("{}/{}", ctx.manifest.expose.build_dir, name));
+            let native_rel = native_rel_for(ctx, name, dep);
             csharp_host::write_csharp_bindings(
                 &out_path,
                 name,
@@ -177,20 +157,11 @@ fn expose_one(
                 &native_rel,
                 &built.artifacts.exports,
             )?;
-            if let Some(parent) = out_path.parent() {
-                let _ = std::fs::copy(
-                    &built.artifacts.header,
-                    parent.join(built.artifacts.header.file_name().unwrap()),
-                );
-            }
+            copy_header_beside(&out_path, &built.artifacts.header);
         }
         (Language::D, "cargo") => {
             let built = native::build_cargo_cdylib(ctx, name, resolved, dep)?;
-            let native_rel = dep
-                .expose_opts
-                .as_ref()
-                .and_then(|o| o.native.clone())
-                .unwrap_or_else(|| format!("{}/{}", ctx.manifest.expose.build_dir, name));
+            let native_rel = native_rel_for(ctx, name, dep);
             d_host::write_d_bindings(
                 &out_path,
                 name,
@@ -199,11 +170,109 @@ fn expose_one(
                 &native_rel,
                 &built.artifacts.exports,
             )?;
-            if let Some(parent) = out_path.parent() {
-                let _ = std::fs::copy(
-                    &built.artifacts.header,
-                    parent.join(built.artifacts.header.file_name().unwrap()),
-                );
+            copy_header_beside(&out_path, &built.artifacts.header);
+        }
+        (Language::V, "cargo") => {
+            let built = native::build_cargo_cdylib(ctx, name, resolved, dep)?;
+            let native_rel = native_rel_for(ctx, name, dep);
+            v_host::write_v_bindings(
+                &out_path,
+                name,
+                dep,
+                &built.artifacts.lib_name,
+                &native_rel,
+                &built.artifacts.exports,
+            )?;
+            copy_header_beside(&out_path, &built.artifacts.header);
+        }
+        (Language::Odin, "cargo") => {
+            let built = native::build_cargo_cdylib(ctx, name, resolved, dep)?;
+            let native_rel = native_rel_for(ctx, name, dep);
+            odin_host::write_odin_bindings(
+                &out_path,
+                name,
+                dep,
+                &built.artifacts.lib_name,
+                &native_rel,
+                &built.artifacts.exports,
+            )?;
+            copy_header_beside(&out_path, &built.artifacts.header);
+        }
+        (Language::Hare, "cargo") => {
+            let built = native::build_cargo_cdylib(ctx, name, resolved, dep)?;
+            let native_rel = native_rel_for(ctx, name, dep);
+            hare_host::write_hare_bindings(
+                &out_path,
+                name,
+                dep,
+                &built.artifacts.lib_name,
+                &native_rel,
+                &built.artifacts.exports,
+            )?;
+            copy_header_beside(&out_path, &built.artifacts.header);
+        }
+        // Path/git non-cargo: real build+link for c/cpp/zig when feasible.
+        (Language::C | Language::Cpp, eco) if matches!(eco, "c" | "cpp" | "zig") => {
+            match path_native::build_path_git_lib(ctx, name, dep, resolved) {
+                Ok(built) => {
+                    let mut include_names = Vec::new();
+                    if let Some(parent) = out_path.parent() {
+                        let out_name = out_path.file_name().and_then(|s| s.to_str());
+                        for h in &built.headers {
+                            let Some(fname) = h.file_name().and_then(|s| s.to_str()) else {
+                                continue;
+                            };
+                            let dest_name = if Some(fname) == out_name {
+                                let stem = PathBuf::from(fname)
+                                    .file_stem()
+                                    .map(|s| s.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| fname.to_string());
+                                format!("{stem}_api.h")
+                            } else {
+                                fname.to_string()
+                            };
+                            let _ = std::fs::copy(h, parent.join(&dest_name));
+                            include_names.push(dest_name);
+                        }
+                    }
+                    path_native::write_c_path_native_header(
+                        &out_path,
+                        name,
+                        dep,
+                        &built,
+                        &include_names,
+                    )?;
+                }
+                Err(err) => {
+                    // Clear, actionable error — do not silently stub when build was requested.
+                    bail!(
+                        "path/git expose build failed for `{name}` ({eco}): {err}\n\
+                         Use a directory of .c/.cpp/.zig sources (or a Makefile writing $OUT), \
+                         or fix the toolchain error above."
+                    );
+                }
+            }
+        }
+        (Language::Zig, eco) if matches!(eco, "c" | "cpp" | "zig") => {
+            match path_native::build_path_git_lib(ctx, name, dep, resolved) {
+                Ok(built) => {
+                    path_native::write_zig_path_native_bindings(&out_path, name, dep, &built)?;
+                    let build_zig = ctx.root.join("build.zig");
+                    if build_zig.exists() {
+                        crate::util::edit::patch_build_zig_link(
+                            &build_zig,
+                            name,
+                            &built.native_rel,
+                            &built.lib_name,
+                        )?;
+                    }
+                }
+                Err(err) => {
+                    bail!(
+                        "path/git expose build failed for `{name}` ({eco}): {err}\n\
+                         Use path:… with compilable sources, or git+… that clones cleanly."
+                    );
+                }
             }
         }
         (Language::Rust, eco) if eco != "cargo" => {
@@ -214,6 +283,7 @@ fn expose_one(
             nim_host::write_nim_path_git_stub(&out_path, name, dep)?;
         }
         (Language::C | Language::Cpp, eco) if eco != "cargo" => {
+            // Non c/cpp/zig ecosystems on a C host — stub with clear hint.
             c_host::write_c_path_git_stub(&out_path, name, dep)?;
         }
         _ => {
@@ -225,6 +295,21 @@ fn expose_one(
         out: out_path,
         consumer,
     }))
+}
+
+fn native_rel_for(ctx: &AppCtx, name: &str, dep: &Dependency) -> String {
+    dep.expose_opts
+        .as_ref()
+        .and_then(|o| o.native.clone())
+        .unwrap_or_else(|| format!("{}/{}", ctx.manifest.expose.build_dir, name))
+}
+
+fn copy_header_beside(out_path: &std::path::Path, header: &std::path::Path) {
+    if let Some(parent) = out_path.parent()
+        && let Some(fname) = header.file_name()
+    {
+        let _ = std::fs::copy(header, parent.join(fname));
+    }
 }
 
 fn default_out(manifest: &Manifest, name: &str, consumer: Language) -> String {

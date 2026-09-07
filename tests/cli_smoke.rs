@@ -132,3 +132,78 @@ fn add_path_non_cargo_updates_manifest() {
         "{manifest}"
     );
 }
+
+#[test]
+fn add_path_c_on_c_host_builds_native() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Makefile"), "all:\n\t@echo ok\n").unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/main.c"), "int main(void){return 0;}\n").unwrap();
+
+    let vendor = dir.path().join("vendor/mylib");
+    std::fs::create_dir_all(&vendor).unwrap();
+    std::fs::write(
+        vendor.join("mylib.h"),
+        "#pragma once\nint mylib_add(int a, int b);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        vendor.join("mylib.c"),
+        "#include \"mylib.h\"\nint mylib_add(int a, int b) { return a + b; }\n",
+    )
+    .unwrap();
+
+    rig()
+        .current_dir(dir.path())
+        .args(["init"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("host: c"));
+
+    let path_spec = format!("path:{}", vendor.display());
+    rig()
+        .current_dir(dir.path())
+        .args(["add", "--c", &path_spec])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("added"));
+
+    let header = dir.path().join("src/rig_bindings/mylib.h");
+    assert!(header.is_file(), "expected expose header");
+    let text = std::fs::read_to_string(&header).unwrap();
+    assert!(text.contains("RIG_NATIVE_LIB_mylib"), "{text}");
+    assert!(text.contains("mylib_native"), "{text}");
+
+    let native = dir.path().join("target/rig/mylib");
+    assert!(native.is_dir(), "expected native out dir");
+    let has_lib = std::fs::read_dir(&native).unwrap().any(|e| {
+        let n = e.unwrap().file_name().to_string_lossy().into_owned();
+        n.contains("mylib_native")
+            && (n.ends_with(".dylib") || n.ends_with(".so") || n.ends_with(".dll"))
+    });
+    assert!(has_lib, "expected built mylib_native shared lib");
+}
+
+#[test]
+fn add_path_c_empty_dir_errors_clearly() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Makefile"), "all:\n\t@echo ok\n").unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/main.c"), "int main(void){return 0;}\n").unwrap();
+    let vendor = dir.path().join("vendor/empty");
+    std::fs::create_dir_all(&vendor).unwrap();
+
+    rig()
+        .current_dir(dir.path())
+        .args(["init"])
+        .assert()
+        .success();
+
+    let path_spec = format!("path:{}", vendor.display());
+    rig()
+        .current_dir(dir.path())
+        .args(["add", "--c", &path_spec])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("path/git expose build failed").or(predicate::str::contains("no compilable")));
+}
