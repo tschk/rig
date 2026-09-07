@@ -49,6 +49,7 @@ Resolves the package, pins it in `rig.toml` / `rig.lock`, and **auto-exposes** a
 - **Zig host ← cargo crate:** builds a generic `{crate}_ffi` cdylib façade (markers: `{crate}_abi_version` / `_version` / `_name`), writes `src/rig_bindings/<pkg>_bindings.zig`, and patches `build.zig` with `// rig-expose-begin` link markers.
 - **Nim host ← cargo crate:** builds the same façade and writes `src/rig_bindings/<pkg>.nim` (`importc` + `passL` link hints).
 - **C/C++ host ← cargo crate:** builds the same façade and writes `src/rig_bindings/<pkg>.h` (declarations + `-L/-l` metadata macros).
+- **C# host ← cargo crate:** builds the same façade and writes `src/rig_bindings/<pkg>.cs` (`DllImport` P/Invoke wrappers).
 - **Rust host ← foreign lang:** generates an equilibrium-ffi `load` path stub.
 
 Ecosystem flags (mutually exclusive): `--cargo`/`--rust`, `--zig`, `--nim`, `--c`, `--cpp`, `--v`, `--d`, `--odin`, `--hare`, `--csharp`/`--cs`.
@@ -130,14 +131,14 @@ For every `rig add --rust <crate>` on a Zig (or other non-Rust) host, rig genera
 | `{crate}_version` | Null-terminated version string |
 | `{crate}_name` | Null-terminated crate name |
 
-Known enrichments (today: `rx4`) may export additional symbols beyond the markers.
+Known enrichments (today: `rx4`, `sha2`) may export additional **methods** beyond the markers (e.g. `rx4_prompt_smoke`, `sha2_hash_256`).
 
 ### Honest limits
 
 - **Not** an automatic wrap of arbitrary Rust APIs (generics, traits, async, non-`repr(C)` types).
 - **cbindgen** of a full public surface is not run automatically; crates need FFI-safe annotations for that to be useful.
 - Crates with `#![forbid(unsafe_code)]` still work: unsafe lives only in the generated façade.
-- Marker symbols embed the version rig pinned; they do not invent domain APIs (e.g. `sha2` markers ≠ hashing helpers).
+- Marker symbols embed the version rig pinned; known enrichments (e.g. `sha2_hash_256`) add selected domain methods intentionally.
 - Rust hosts keep the native Cargo re-export path (`src/rig_bindings/<pkg>.rs`); the cdylib façade is for cross-language hosts.
 
 ## Manifest
