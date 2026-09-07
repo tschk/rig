@@ -6,7 +6,8 @@
 //!    (wrapped as `{crate}_{fn}`).
 //!
 //! Honest skips: generics, traits/`impl` methods, `async`, tuples/arrays/refs,
-//! `String`/`str`/`Vec`, non-`repr(C)` structs, `f16`/`f128`.
+//! `String`/`str`/`Vec`, non-`repr(C)` structs, `f16`/`f128`, `Option<scalar>`
+//! (except pointer / `NonNull` / `NonZero*` niches, which are ABI-safe).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -279,10 +280,27 @@ impl FfiType {
     }
 }
 
+/// How a Rust source type maps across the C façade boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TypeAdapt {
+    /// Same representation on both sides.
+    #[default]
+    Identity,
+    /// `Option<*T>` ↔ nullable raw pointer.
+    OptionPtr,
+    /// `Option<NonNull<T>>` ↔ nullable raw pointer.
+    OptionNonNull,
+    /// `NonNull<T>` ↔ non-null `*mut T` (null in → early-return zero/null).
+    NonNull,
+    /// `NonZero*` ↔ integer (zero in → zero/nullish out).
+    NonZero,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Param {
     pub name: String,
     pub ty: FfiType,
+    pub adapt: TypeAdapt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,6 +322,7 @@ pub struct ExportFn {
     pub rust_callee: Option<String>,
     pub params: Vec<Param>,
     pub ret: FfiType,
+    pub ret_adapt: TypeAdapt,
     pub kind: ExportKind,
     pub is_unsafe: bool,
 }
@@ -324,12 +343,49 @@ fn crate_ident(name: &str) -> String {
 
 /// Parse a single Rust type token into [`FfiType`].
 pub fn parse_ffi_type(raw: &str) -> Option<FfiType> {
+    parse_ffi_type_adapted(raw).map(|(ty, _)| ty)
+}
+
+/// Parse a Rust type into an FFI type plus boundary adaptation.
+pub fn parse_ffi_type_adapted(raw: &str) -> Option<(FfiType, TypeAdapt)> {
     let t = raw
         .trim()
         .trim_start_matches("mut ")
         .trim()
         .replace(' ', "");
     let t = t.as_str();
+
+    // `Option<T>` is FFI-safe iff `T` has a niche matching C nullability /
+    // NonZero layout (raw pointers, NonNull, NonZero*). Scalars like
+    // `Option<i32>` are rejected.
+    if let Some(inner) = strip_wrapped(t, "Option") {
+        return parse_option_inner(inner);
+    }
+    if let Some(inner) = strip_wrapped(t, "core::option::Option") {
+        return parse_option_inner(inner);
+    }
+    if let Some(inner) = strip_wrapped(t, "std::option::Option") {
+        return parse_option_inner(inner);
+    }
+
+    // `NonNull<T>` ≡ `*mut T` for C ABI purposes.
+    if let Some(inner) = strip_wrapped(t, "NonNull")
+        .or_else(|| strip_wrapped(t, "core::ptr::NonNull"))
+        .or_else(|| strip_wrapped(t, "std::ptr::NonNull"))
+    {
+        let (inner_ty, _) = parse_ffi_type_adapted(inner)?;
+        return Some((FfiType::MutPtr(Box::new(inner_ty)), TypeAdapt::NonNull));
+    }
+
+    // `*const ()` / `*mut ()` are common opaque void-pointer spellings; handle
+    // before the blanket `(` reject (which exists to skip tuples).
+    if t == "*const()" {
+        return Some((FfiType::ConstVoid, TypeAdapt::Identity));
+    }
+    if t == "*mut()" {
+        return Some((FfiType::MutVoid, TypeAdapt::Identity));
+    }
+
     if matches!(t, "f16" | "f128" | "str" | "String" | "char")
         || t.contains('<')
         || t.contains('(')
@@ -339,49 +395,131 @@ pub fn parse_ffi_type(raw: &str) -> Option<FfiType> {
     {
         return None;
     }
-    Some(match t {
+    let ty = match t {
         "()" | "void" => FfiType::Void,
         "u8" | "core::ffi::c_uchar" | "std::os::raw::c_uchar" | "libc::c_uchar" => FfiType::U8,
-        "u16" => FfiType::U16,
+        "u16" | "core::ffi::c_ushort" | "std::os::raw::c_ushort" | "libc::c_ushort" => FfiType::U16,
         "u32" | "core::ffi::c_uint" | "std::os::raw::c_uint" | "libc::c_uint" => FfiType::U32,
-        "u64" => FfiType::U64,
-        "usize" | "core::ffi::c_size_t" => FfiType::Usize,
-        "i8" => FfiType::I8,
-        "i16" => FfiType::I16,
+        "u64" | "core::ffi::c_ulonglong" | "std::os::raw::c_ulonglong" | "libc::c_ulonglong" => {
+            FfiType::U64
+        }
+        "usize" | "core::ffi::c_size_t" | "libc::size_t" => FfiType::Usize,
+        "i8" | "core::ffi::c_schar" | "std::os::raw::c_schar" | "libc::c_schar" => FfiType::I8,
+        "i16" | "core::ffi::c_short" | "std::os::raw::c_short" | "libc::c_short" => FfiType::I16,
         "i32" | "core::ffi::c_int" | "std::os::raw::c_int" | "libc::c_int" => FfiType::I32,
-        "i64" => FfiType::I64,
-        "isize" | "core::ffi::c_ssize_t" => FfiType::Isize,
-        "f32" | "core::ffi::c_float" | "std::os::raw::c_float" => FfiType::F32,
-        "f64" | "core::ffi::c_double" | "std::os::raw::c_double" => FfiType::F64,
+        "i64" | "core::ffi::c_longlong" | "std::os::raw::c_longlong" | "libc::c_longlong" => {
+            FfiType::I64
+        }
+        "isize" | "core::ffi::c_ssize_t" | "libc::ssize_t" => FfiType::Isize,
+        "f32" | "core::ffi::c_float" | "std::os::raw::c_float" | "libc::c_float" => FfiType::F32,
+        "f64" | "core::ffi::c_double" | "std::os::raw::c_double" | "libc::c_double" => FfiType::F64,
         "bool" => FfiType::Bool,
+        // NonZero* share ABI with the inner integer (and with Option<NonZero*>).
+        "NonZeroU8" | "core::num::NonZeroU8" | "std::num::NonZeroU8" => FfiType::U8,
+        "NonZeroU16" | "core::num::NonZeroU16" | "std::num::NonZeroU16" => FfiType::U16,
+        "NonZeroU32" | "core::num::NonZeroU32" | "std::num::NonZeroU32" => FfiType::U32,
+        "NonZeroU64" | "core::num::NonZeroU64" | "std::num::NonZeroU64" => FfiType::U64,
+        "NonZeroUsize" | "core::num::NonZeroUsize" | "std::num::NonZeroUsize" => FfiType::Usize,
+        "NonZeroI8" | "core::num::NonZeroI8" | "std::num::NonZeroI8" => FfiType::I8,
+        "NonZeroI16" | "core::num::NonZeroI16" | "std::num::NonZeroI16" => FfiType::I16,
+        "NonZeroI32" | "core::num::NonZeroI32" | "std::num::NonZeroI32" => FfiType::I32,
+        "NonZeroI64" | "core::num::NonZeroI64" | "std::num::NonZeroI64" => FfiType::I64,
+        "NonZeroIsize" | "core::num::NonZeroIsize" | "std::num::NonZeroIsize" => FfiType::Isize,
         "*constc_char"
         | "*constcore::ffi::c_char"
         | "*conststd::os::raw::c_char"
+        | "*conststd::ffi::c_char"
         | "*constlibc::c_char"
         | "*consti8" => FfiType::ConstCChar,
         "*mutc_char"
         | "*mutcore::ffi::c_char"
         | "*mutstd::os::raw::c_char"
+        | "*mutstd::ffi::c_char"
         | "*mutlibc::c_char"
         | "*muti8" => FfiType::MutCChar,
         "*constc_void"
         | "*constcore::ffi::c_void"
         | "*conststd::os::raw::c_void"
-        | "*constlibc::c_void" => FfiType::ConstVoid,
+        | "*conststd::ffi::c_void"
+        | "*constlibc::c_void"
+        | "*const()" => FfiType::ConstVoid,
         "*mutc_void"
         | "*mutcore::ffi::c_void"
         | "*mutstd::os::raw::c_void"
-        | "*mutlibc::c_void" => FfiType::MutVoid,
+        | "*mutstd::ffi::c_void"
+        | "*mutlibc::c_void"
+        | "*mut()" => FfiType::MutVoid,
         other if other.starts_with("*const") => {
-            let inner = parse_ffi_type(&other["*const".len()..])?;
+            let (inner, _) = parse_ffi_type_adapted(&other["*const".len()..])?;
             FfiType::ConstPtr(Box::new(inner))
         }
         other if other.starts_with("*mut") => {
-            let inner = parse_ffi_type(&other["*mut".len()..])?;
+            let (inner, _) = parse_ffi_type_adapted(&other["*mut".len()..])?;
             FfiType::MutPtr(Box::new(inner))
         }
         _ => return None,
-    })
+    };
+    let adapt = if is_nonzero_name(t) {
+        TypeAdapt::NonZero
+    } else {
+        TypeAdapt::Identity
+    };
+    Some((ty, adapt))
+}
+
+fn strip_wrapped<'a>(t: &'a str, wrapper: &str) -> Option<&'a str> {
+    let prefix = format!("{wrapper}<");
+    let rest = t.strip_prefix(&prefix)?;
+    let mut depth = 1i32;
+    for (i, ch) in rest.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    let end = i + ch.len_utf8();
+                    if end == rest.len() {
+                        return Some(&rest[..i]);
+                    }
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_option_inner(inner: &str) -> Option<(FfiType, TypeAdapt)> {
+    let (ty, inner_adapt) = parse_ffi_type_adapted(inner)?;
+    match (ty, inner_adapt) {
+        (
+            ty @ (FfiType::ConstCChar
+            | FfiType::MutCChar
+            | FfiType::ConstVoid
+            | FfiType::MutVoid
+            | FfiType::ConstPtr(_)
+            | FfiType::MutPtr(_)),
+            TypeAdapt::NonNull,
+        ) => Some((ty, TypeAdapt::OptionNonNull)),
+        (
+            ty @ (FfiType::ConstCChar
+            | FfiType::MutCChar
+            | FfiType::ConstVoid
+            | FfiType::MutVoid
+            | FfiType::ConstPtr(_)
+            | FfiType::MutPtr(_)),
+            _,
+        ) => Some((ty, TypeAdapt::OptionPtr)),
+        // NonZero* already collapsed to integers; Option<NonZeroU32> ≡ u32.
+        (ty, TypeAdapt::NonZero) => Some((ty, TypeAdapt::NonZero)),
+        _ => None,
+    }
+}
+
+fn is_nonzero_name(t: &str) -> bool {
+    let base = t.rsplit("::").next().unwrap_or(t);
+    base.starts_with("NonZero")
 }
 
 fn split_params(params: &str) -> Option<Vec<Param>> {
@@ -414,7 +552,7 @@ fn split_params(params: &str) -> Option<Vec<Param>> {
             // unnamed — synthesize
             (format!("arg{idx}"), part)
         };
-        let ty = parse_ffi_type(ty_raw)?;
+        let (ty, adapt) = parse_ffi_type_adapted(ty_raw)?;
         // Avoid C/Rust keyword collisions in generated headers
         let name = match name.as_str() {
             "type" | "in" | "out" | "string" | "mod" | "fn" | "let" | "pub" => {
@@ -422,7 +560,7 @@ fn split_params(params: &str) -> Option<Vec<Param>> {
             }
             _ => name,
         };
-        out.push(Param { name, ty });
+        out.push(Param { name, ty, adapt });
     }
     Some(out)
 }
@@ -695,6 +833,7 @@ fn classify_signature(
 
     let is_extern_c = compact.contains("extern \"C\"")
         || compact.contains("extern \"c\"")
+        || compact.contains("extern \"C-unwind\"")
         || compact.contains("extern'C'");
     let is_unsafe = compact.contains("unsafe ");
 
@@ -740,7 +879,7 @@ fn classify_signature(
             return None;
         }
     };
-    let ret = match parse_ffi_type(ret_raw) {
+    let (ret, ret_adapt) = match parse_ffi_type_adapted(ret_raw) {
         Some(t) => t,
         None => {
             report.skipped_unfriendly += 1;
@@ -754,6 +893,7 @@ fn classify_signature(
             rust_callee: Some(format!("{crate_safe}::{name}")),
             params,
             ret,
+            ret_adapt,
             kind: ExportKind::UpstreamExternC,
             is_unsafe,
         });
@@ -765,6 +905,7 @@ fn classify_signature(
             rust_callee: Some(format!("{crate_safe}::{name}")),
             params,
             ret,
+            ret_adapt,
             kind: ExportKind::UpstreamExternC,
             is_unsafe,
         });
@@ -781,6 +922,7 @@ fn classify_signature(
         rust_callee: Some(format!("{crate_safe}::{name}")),
         params,
         ret,
+        ret_adapt,
         kind: ExportKind::AutoWrap,
         is_unsafe,
     })
@@ -918,6 +1060,83 @@ mod tests {
         assert!(parse_ffi_type("&str").is_none());
         assert!(parse_ffi_type("Vec<u8>").is_none());
         assert!(parse_ffi_type("f16").is_none());
+    }
+
+    #[test]
+    fn parses_option_pointer_and_nonzero_niches() {
+        assert_eq!(parse_ffi_type("*const c_void"), Some(FfiType::ConstVoid));
+        assert_eq!(
+            parse_ffi_type("Option<*mut u8>"),
+            Some(FfiType::MutPtr(Box::new(FfiType::U8)))
+        );
+        assert_eq!(
+            parse_ffi_type("Option<*const c_void>"),
+            Some(FfiType::ConstVoid)
+        );
+        assert_eq!(
+            parse_ffi_type("NonNull<u8>"),
+            Some(FfiType::MutPtr(Box::new(FfiType::U8)))
+        );
+        assert_eq!(
+            parse_ffi_type("Option<NonNull<u32>>"),
+            Some(FfiType::MutPtr(Box::new(FfiType::U32)))
+        );
+        assert_eq!(parse_ffi_type("NonZeroU32"), Some(FfiType::U32));
+        assert_eq!(
+            parse_ffi_type("Option<core::num::NonZeroU64>"),
+            Some(FfiType::U64)
+        );
+        assert_eq!(parse_ffi_type("*const ()"), Some(FfiType::ConstVoid));
+        assert_eq!(parse_ffi_type("*mut ()"), Some(FfiType::MutVoid));
+        assert_eq!(parse_ffi_type("c_longlong"), None); // needs path prefix or i64
+        assert_eq!(parse_ffi_type("core::ffi::c_longlong"), Some(FfiType::I64));
+        assert_eq!(parse_ffi_type("core::ffi::c_ushort"), Some(FfiType::U16));
+        // Option around plain scalars is NOT niche-safe for C.
+        assert!(parse_ffi_type("Option<i32>").is_none());
+        assert!(parse_ffi_type("Option<bool>").is_none());
+    }
+
+    #[test]
+    fn scans_option_pointer_and_c_unwind() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "niche_api"
+version = "0.1.0"
+edition = "2021"
+[lib]
+path = "src/lib.rs"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            r#"
+use std::ptr::NonNull;
+use std::num::NonZeroU32;
+
+pub fn take_opt(p: Option<*mut u8>) -> Option<*mut u8> { p }
+pub fn take_nn(p: NonNull<u8>) -> u8 { unsafe { *p.as_ptr() } }
+pub fn take_nz(n: NonZeroU32) -> u32 { n.get() }
+
+#[no_mangle]
+pub extern "C-unwind" fn niche_api_raw(x: u32) -> u32 { x }
+"#,
+        )
+        .unwrap();
+        let report = scan_crate_sources(root, "niche_api");
+        let names: Vec<_> = report
+            .exports
+            .iter()
+            .map(|e| e.export_name.as_str())
+            .collect();
+        assert!(names.contains(&"niche_api_take_opt"), "{names:?}");
+        assert!(names.contains(&"niche_api_take_nn"), "{names:?}");
+        assert!(names.contains(&"niche_api_take_nz"), "{names:?}");
+        assert!(names.contains(&"niche_api_raw"), "{names:?}");
     }
 
     #[test]

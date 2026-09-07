@@ -17,9 +17,11 @@
 //! 3. Known enrichments (e.g. `rx4`) may export additional symbols.
 //!
 //! Auto-wrap: when sources are available, rig scans for simple `pub fn` /
-//! existing `extern "C"` surfaces and exports them from the façade (see
-//! `api_scan`). Honest limits remain: generics, traits/`impl` methods, async,
-//! tuples/refs/`str`/`String`/`Vec`, and non-FFI-safe types are skipped.
+//! existing `extern "C"` / `extern "C-unwind"` surfaces and exports them from
+//! the façade (see `api_scan`). Niche-safe types (`Option<*T>`, `NonNull`,
+//! `NonZero*`, `*const ()`) are adapted at the façade boundary. Honest limits
+//! remain: generics, traits/`impl` methods, async, tuples/refs/`str`/`String`/
+//! `Vec`, `Option<scalar>`, and other non-FFI-safe types are skipped.
 //! Optional `cbindgen` runs only when the crate ships `cbindgen.toml` and the
 //! `cbindgen` binary is on `PATH`.
 
@@ -357,6 +359,7 @@ fn marker_exports(name: &str, _version: &str) -> Vec<ExportFn> {
             rust_callee: None,
             params: vec![],
             ret: FfiType::U32,
+            ret_adapt: Default::default(),
             kind: ExportKind::Marker,
             is_unsafe: false,
         },
@@ -365,6 +368,7 @@ fn marker_exports(name: &str, _version: &str) -> Vec<ExportFn> {
             rust_callee: None,
             params: vec![],
             ret: FfiType::ConstCChar,
+            ret_adapt: Default::default(),
             kind: ExportKind::Marker,
             is_unsafe: false,
         },
@@ -373,6 +377,7 @@ fn marker_exports(name: &str, _version: &str) -> Vec<ExportFn> {
             rust_callee: None,
             params: vec![],
             ret: FfiType::ConstCChar,
+            ret_adapt: Default::default(),
             kind: ExportKind::Marker,
             is_unsafe: false,
         },
@@ -385,14 +390,17 @@ fn sha2_exports() -> Vec<ExportFn> {
         Param {
             name: "data".into(),
             ty: FfiType::ConstPtr(Box::new(FfiType::U8)),
+            adapt: Default::default(),
         },
         Param {
             name: "len".into(),
             ty: FfiType::Usize,
+            adapt: Default::default(),
         },
         Param {
             name: "out".into(),
             ty: FfiType::MutPtr(Box::new(FfiType::U8)),
+            adapt: Default::default(),
         },
     ];
     v.push(ExportFn {
@@ -400,6 +408,7 @@ fn sha2_exports() -> Vec<ExportFn> {
         rust_callee: None,
         params: hash_params.clone(),
         ret: FfiType::I32,
+        ret_adapt: Default::default(),
         kind: ExportKind::Enrichment,
         is_unsafe: false,
     });
@@ -408,6 +417,7 @@ fn sha2_exports() -> Vec<ExportFn> {
         rust_callee: None,
         params: hash_params,
         ret: FfiType::I32,
+        ret_adapt: Default::default(),
         kind: ExportKind::Enrichment,
         is_unsafe: false,
     });
@@ -423,13 +433,16 @@ fn crc32fast_exports() -> Vec<ExportFn> {
             Param {
                 name: "data".into(),
                 ty: FfiType::ConstPtr(Box::new(FfiType::U8)),
+                adapt: Default::default(),
             },
             Param {
                 name: "len".into(),
                 ty: FfiType::Usize,
+                adapt: Default::default(),
             },
         ],
         ret: FfiType::U32,
+        ret_adapt: Default::default(),
         kind: ExportKind::Enrichment,
         is_unsafe: false,
     });
@@ -445,17 +458,21 @@ fn md5_exports() -> Vec<ExportFn> {
             Param {
                 name: "data".into(),
                 ty: FfiType::ConstPtr(Box::new(FfiType::U8)),
+                adapt: Default::default(),
             },
             Param {
                 name: "len".into(),
                 ty: FfiType::Usize,
+                adapt: Default::default(),
             },
             Param {
                 name: "out".into(),
                 ty: FfiType::MutPtr(Box::new(FfiType::U8)),
+                adapt: Default::default(),
             },
         ],
         ret: FfiType::I32,
+        ret_adapt: Default::default(),
         kind: ExportKind::Enrichment,
         is_unsafe: false,
     });
@@ -469,6 +486,7 @@ fn rx4_exports() -> Vec<ExportFn> {
         rust_callee: None,
         params: vec![],
         ret: FfiType::MutVoid,
+        ret_adapt: Default::default(),
         kind: ExportKind::Enrichment,
         is_unsafe: false,
     });
@@ -478,8 +496,10 @@ fn rx4_exports() -> Vec<ExportFn> {
         params: vec![Param {
             name: "agent".into(),
             ty: FfiType::MutVoid,
+            adapt: Default::default(),
         }],
         ret: FfiType::Void,
+        ret_adapt: Default::default(),
         kind: ExportKind::Enrichment,
         is_unsafe: false,
     });
@@ -490,13 +510,16 @@ fn rx4_exports() -> Vec<ExportFn> {
             Param {
                 name: "agent".into(),
                 ty: FfiType::MutVoid,
+                adapt: Default::default(),
             },
             Param {
                 name: "prompt".into(),
                 ty: FfiType::ConstCChar,
+                adapt: Default::default(),
             },
         ],
         ret: FfiType::I32,
+        ret_adapt: Default::default(),
         kind: ExportKind::Enrichment,
         is_unsafe: false,
     });
@@ -939,8 +962,10 @@ fn hex_exports() -> Vec<ExportFn> {
         params: vec![Param {
             name: "len".into(),
             ty: FfiType::Usize,
+            adapt: Default::default(),
         }],
         ret: FfiType::Usize,
+        ret_adapt: Default::default(),
         kind: ExportKind::Enrichment,
         is_unsafe: false,
     });
@@ -951,21 +976,26 @@ fn hex_exports() -> Vec<ExportFn> {
             Param {
                 name: "data".into(),
                 ty: FfiType::ConstPtr(Box::new(FfiType::U8)),
+                adapt: Default::default(),
             },
             Param {
                 name: "len".into(),
                 ty: FfiType::Usize,
+                adapt: Default::default(),
             },
             Param {
                 name: "out".into(),
                 ty: FfiType::MutPtr(Box::new(FfiType::U8)),
+                adapt: Default::default(),
             },
             Param {
                 name: "out_len".into(),
                 ty: FfiType::Usize,
+                adapt: Default::default(),
             },
         ],
         ret: FfiType::I32,
+        ret_adapt: Default::default(),
         kind: ExportKind::Enrichment,
         is_unsafe: false,
     });
@@ -976,21 +1006,26 @@ fn hex_exports() -> Vec<ExportFn> {
             Param {
                 name: "data".into(),
                 ty: FfiType::ConstPtr(Box::new(FfiType::U8)),
+                adapt: Default::default(),
             },
             Param {
                 name: "len".into(),
                 ty: FfiType::Usize,
+                adapt: Default::default(),
             },
             Param {
                 name: "out".into(),
                 ty: FfiType::MutPtr(Box::new(FfiType::U8)),
+                adapt: Default::default(),
             },
             Param {
                 name: "out_len".into(),
                 ty: FfiType::Usize,
+                adapt: Default::default(),
             },
         ],
         ret: FfiType::I32,
+        ret_adapt: Default::default(),
         kind: ExportKind::Enrichment,
         is_unsafe: false,
     });
@@ -1299,13 +1334,16 @@ mod tests {
                 Param {
                     name: "a".into(),
                     ty: FfiType::I32,
+                    adapt: Default::default(),
                 },
                 Param {
                     name: "b".into(),
                     ty: FfiType::I32,
+                    adapt: Default::default(),
                 },
             ],
             ret: FfiType::I32,
+            ret_adapt: Default::default(),
             kind: ExportKind::AutoWrap,
             is_unsafe: false,
         });
@@ -1317,6 +1355,31 @@ mod tests {
         let hdr = header_from_exports("simple_api", "simple_api_ffi", &exports, None);
         assert!(hdr.contains("simple_api_add"));
         assert!(hdr.contains("int32_t"));
+    }
+
+    #[test]
+    fn niche_adapt_emits_option_conversions() {
+        use crate::expose::api_scan::TypeAdapt;
+        use crate::expose::surface;
+        let mut exports = marker_exports("niche_api", "0.1.0");
+        exports.push(ExportFn {
+            export_name: "niche_api_take_opt".into(),
+            rust_callee: Some("niche_api::take_opt".into()),
+            params: vec![Param {
+                name: "p".into(),
+                ty: FfiType::MutPtr(Box::new(FfiType::U8)),
+                adapt: TypeAdapt::OptionPtr,
+            }],
+            ret: FfiType::MutPtr(Box::new(FfiType::U8)),
+            ret_adapt: TypeAdapt::OptionPtr,
+            kind: ExportKind::AutoWrap,
+            is_unsafe: false,
+        });
+        let lib = generic_lib_rs_with_wraps("niche_api", "0.1.0", &exports, "test");
+        assert!(lib.contains("fn niche_api_take_opt"), "{lib}");
+        assert!(lib.contains("is_null()"), "{lib}");
+        assert!(lib.contains("unwrap_or"), "{lib}");
+        let _ = surface::emit_rust_wrappers(&exports);
     }
 
     #[test]
