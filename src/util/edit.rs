@@ -119,37 +119,69 @@ pub fn cargo_remove_dep(cargo_toml: &Path, name: &str) -> Result<bool> {
 
 /// Idempotent build.zig patch: link the rig-built cdylib (Zig 0.14+ / 0.16 API).
 ///
-/// Inserts markers and wires `root_module.addLibraryPath` + `linkSystemLibrary`
-/// + `addRPath` + `addIncludePath` for the façade under `lib_hint`.
+/// Inserts **per-package** markers and wires `root_module.addLibraryPath` +
+/// `linkSystemLibrary` + `addRPath` + `addIncludePath` for the façade under
+/// `lib_hint`. Multiple `rig add` / `rig sync` calls accumulate without clobbering.
 pub fn patch_build_zig_link(
     build_zig: &Path,
     pkg: &str,
     lib_hint: &str,
     lib_name: &str,
 ) -> Result<()> {
-    const BEGIN: &str = "// rig-expose-begin";
-    const END: &str = "// rig-expose-end";
+    let begin = format!("// rig-expose-begin:{pkg}");
+    let end = format!("// rig-expose-end:{pkg}");
     let mut text = if build_zig.is_file() {
         std::fs::read_to_string(build_zig)?
     } else {
         String::new()
     };
+
+    // Migrate legacy single unscoped region once (first multi-pkg sync).
+    const LEGACY_BEGIN: &str = "// rig-expose-begin";
+    const LEGACY_END: &str = "// rig-expose-end";
+    let has_scoped = text
+        .lines()
+        .any(|l| l.trim().starts_with("// rig-expose-begin:"));
+    if !has_scoped {
+        let legacy = text.lines().any(|l| l.trim() == LEGACY_BEGIN)
+            && text.lines().any(|l| l.trim() == LEGACY_END);
+        if legacy {
+            // Drop the entire legacy block; per-pkg blocks replace it.
+            if let (Some(s), Some(e)) = (text.find(LEGACY_BEGIN), text.find(LEGACY_END)) {
+                let s = text[..s].rfind('\n').map(|i| i + 1).unwrap_or(0);
+                let end_idx = e + LEGACY_END.len();
+                let end_idx = if text[end_idx..].starts_with('\n') {
+                    end_idx + 1
+                } else {
+                    end_idx
+                };
+                text.replace_range(s..end_idx, "");
+            }
+        }
+    }
+
     let block = format!(
-        "    {begin}\n    // rig: link `{pkg}` façade `{lib_name}` from {lib_hint}\n    exe.root_module.addLibraryPath(b.path(\"{lib_hint}\"));\n    exe.root_module.addRPath(b.path(\"{lib_hint}\"));\n    exe.root_module.addIncludePath(b.path(\"{lib_hint}\"));\n    exe.root_module.linkSystemLibrary(\"{lib_name}\", .{{}});\n    {end}\n",
-        begin = BEGIN,
-        end = END,
+        "    {begin}\n    // rig: link `{pkg}` façade `{lib_name}` from {lib_hint}\n    exe.root_module.addLibraryPath(b.path(\"{lib_hint}\"));\n    exe.root_module.addRPath(b.path(\"{lib_hint}\"));\n    exe.root_module.addIncludePath(b.path(\"{lib_hint}\"));\n    exe.root_module.linkSystemLibrary(\"{lib_name}\", .{{}});\n    {end}\n"
     );
 
-    // Only treat as already-patched when BOTH markers exist as whole lines.
     let has_region =
-        text.lines().any(|l| l.trim() == BEGIN) && text.lines().any(|l| l.trim() == END);
+        text.lines().any(|l| l.trim() == begin) && text.lines().any(|l| l.trim() == end);
     if has_region {
-        if let (Some(s), Some(e)) = (text.find(BEGIN), text.find(END)) {
-            // Expand to start of line for BEGIN
+        if let (Some(s), Some(e)) = (text.find(&begin), text.find(&end)) {
             let s = text[..s].rfind('\n').map(|i| i + 1).unwrap_or(0);
-            let end = e + END.len();
-            text.replace_range(s..end, block.trim_end());
-            text.push('\n');
+            let end_idx = e + end.len();
+            text.replace_range(s..end_idx, block.trim_end());
+            if !text[s..].starts_with('\n') && s > 0 {
+                // keep surrounding newlines tidy
+            }
+            if !text[end_idx.min(text.len())..].starts_with('\n') {
+                // replace_range already removed old end; ensure newline after block
+            }
+            // Ensure a trailing newline after the replaced block
+            let after = s + block.trim_end().len();
+            if after >= text.len() || !text[after..].starts_with('\n') {
+                text.insert(after.min(text.len()), '\n');
+            }
         }
     } else if let Some(idx) = text.find("b.installArtifact(exe);") {
         text.insert_str(idx, &format!("\n{block}\n    "));
@@ -159,4 +191,45 @@ pub fn patch_build_zig_link(
     }
     std::fs::write(build_zig, text)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn patch_build_zig_accumulates_packages() {
+        let dir = tempfile::tempdir().unwrap();
+        let build = dir.path().join("build.zig");
+        fs::write(
+            &build,
+            r#"const std = @import("std");
+pub fn build(b: *std.Build) void {
+    const exe = b.addExecutable(.{ .name = "demo", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    })});
+    b.installArtifact(exe);
+}
+"#,
+        )
+        .unwrap();
+        patch_build_zig_link(&build, "sha2", "target/rig/sha2", "sha2_ffi").unwrap();
+        patch_build_zig_link(&build, "rx4", "target/rig/rx4", "rx4_ffi").unwrap();
+        let text = fs::read_to_string(&build).unwrap();
+        assert!(text.contains("// rig-expose-begin:sha2"));
+        assert!(text.contains("// rig-expose-begin:rx4"));
+        assert!(text.contains("linkSystemLibrary(\"sha2_ffi\""));
+        assert!(text.contains("linkSystemLibrary(\"rx4_ffi\""));
+        // Idempotent update
+        patch_build_zig_link(&build, "sha2", "target/rig/sha2", "sha2_ffi").unwrap();
+        let text2 = fs::read_to_string(&build).unwrap();
+        assert_eq!(
+            text2.matches("// rig-expose-begin:sha2").count(),
+            1,
+            "sha2 block should remain unique"
+        );
+    }
 }
