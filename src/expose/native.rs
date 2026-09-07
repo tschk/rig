@@ -1,4 +1,4 @@
-//! Build cargo cdylib façades into `target/rig/<pkg>/`.
+//! Build cargo cdylib façades (or passthrough upstream cdylibs) into `target/rig/<pkg>/`.
 
 use super::shim::{self, ShimArtifacts};
 use crate::manifest::Dependency;

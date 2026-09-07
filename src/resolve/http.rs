@@ -28,9 +28,7 @@ pub fn pick_semver(candidates: &[String], req: Option<&str>) -> Option<String> {
         .iter()
         .filter_map(|s| {
             let cleaned = s.trim().trim_start_matches('v');
-            semver::Version::parse(cleaned)
-                .ok()
-                .map(|v| (s.clone(), v))
+            semver::Version::parse(cleaned).ok().map(|v| (s.clone(), v))
         })
         .collect();
     if parsed.is_empty() {
@@ -40,7 +38,8 @@ pub fn pick_semver(candidates: &[String], req: Option<&str>) -> Option<String> {
     if let Some(req) = req {
         if req == "*" || req == "latest" {
             // fall through to best
-        } else if let Ok(exact) = semver::Version::parse(req.trim_start_matches('=').trim_start_matches('v'))
+        } else if let Ok(exact) =
+            semver::Version::parse(req.trim_start_matches('=').trim_start_matches('v'))
         {
             if let Some((s, _)) = parsed.iter().find(|(_, v)| *v == exact) {
                 return Some(s.clone());

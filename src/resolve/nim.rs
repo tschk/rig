@@ -131,7 +131,8 @@ pub fn resolve(
     features: Option<Vec<String>>,
     no_default: bool,
 ) -> Result<ResolvedPackage> {
-    if let Some(pkg) = super::git_path::resolve_path_or_git("nim", spec, features.clone(), no_default)
+    if let Some(pkg) =
+        super::git_path::resolve_path_or_git("nim", spec, features.clone(), no_default)
     {
         return Ok(pkg);
     }
@@ -143,10 +144,7 @@ pub fn resolve(
         .find(|p| p.name.to_ascii_lowercase() == needle)
         .with_context(|| format!("nimble package not found: {}", spec.name))?;
 
-    let version = spec
-        .version_req
-        .clone()
-        .unwrap_or_else(|| "git".into());
+    let version = spec.version_req.clone().unwrap_or_else(|| "git".into());
     let git = if found.method == "git" && !found.url.is_empty() {
         Some(found.url.clone())
     } else {
@@ -166,7 +164,6 @@ pub fn resolve(
         default_features: if no_default { Some(false) } else { None },
     })
 }
-
 
 #[cfg(test)]
 mod tests {

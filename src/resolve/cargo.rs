@@ -205,7 +205,6 @@ pub fn search(query: &str, limit: usize) -> Result<Vec<(String, String, String)>
     Ok(out)
 }
 
-
 pub fn latest_version(name: &str) -> Result<String> {
     let r = fetch_crates_io(name, None)?;
     Ok(r.version)

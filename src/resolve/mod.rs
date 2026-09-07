@@ -142,11 +142,7 @@ pub fn resolve(
     }
 }
 
-pub fn search(
-    eco: Language,
-    query: &str,
-    limit: usize,
-) -> Result<SearchOutcome> {
+pub fn search(eco: Language, query: &str, limit: usize) -> Result<SearchOutcome> {
     match eco {
         Language::Rust => Ok(SearchOutcome::Hits(cargo::search(query, limit)?)),
         Language::Nim => Ok(SearchOutcome::Hits(nim::search(query, limit)?)),
@@ -159,11 +155,9 @@ pub fn search(
                 hits,
             })
         }
-        Language::C | Language::Cpp | Language::V | Language::Odin | Language::Hare => {
-            Ok(SearchOutcome::Unsupported(git_path::search_unsupported(
-                eco.ecosystem(),
-            )))
-        }
+        Language::C | Language::Cpp | Language::V | Language::Odin | Language::Hare => Ok(
+            SearchOutcome::Unsupported(git_path::search_unsupported(eco.ecosystem())),
+        ),
     }
 }
 
@@ -213,10 +207,8 @@ mod tests {
 
     #[test]
     fn parse_url_spec() {
-        let s = PackageSpec::parse(
-            "https://github.com/org/pkg/archive/refs/tags/1.0.0.tar.gz",
-        )
-        .unwrap();
+        let s = PackageSpec::parse("https://github.com/org/pkg/archive/refs/tags/1.0.0.tar.gz")
+            .unwrap();
         assert_eq!(s.name, "pkg");
         assert!(s.url.is_some());
     }

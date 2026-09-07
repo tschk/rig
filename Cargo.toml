@@ -4,12 +4,14 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "ISC"
+authors = ["Max Carter <undivisible@vk.com>"]
 description = "Cross-language native dependency manager. Detect host lang, add libs via CLI, expose them in-process with equilibrium-ffi."
 repository = "https://github.com/tschk/rig"
 homepage = "https://github.com/tschk/rig"
 readme = "README.md"
 keywords = ["ffi", "polyglot", "package-manager", "equilibrium", "cli"]
 categories = ["command-line-utilities", "development-tools"]
+exclude = [".rig-internal/", "examples/**/target/", "examples/**/zig-out/", "examples/**/.zig-cache/"]
 
 [lib]
 name = "rig"

@@ -10,9 +10,8 @@ static SEARCH_ENDPOINT: OnceLock<String> = OnceLock::new();
 fn search_endpoint() -> String {
     SEARCH_ENDPOINT
         .get_or_init(|| {
-            discover_search_endpoint().unwrap_or_else(|_| {
-                "https://azuresearch-usnc.nuget.org/query".to_string()
-            })
+            discover_search_endpoint()
+                .unwrap_or_else(|_| "https://azuresearch-usnc.nuget.org/query".to_string())
         })
         .clone()
 }
@@ -119,8 +118,7 @@ pub fn resolve(
         if versions.is_empty() {
             bail!("nuget package not found: {}", spec.name);
         }
-        let ver = pick_semver(&versions, Some(req))
-            .context("could not select nuget version")?;
+        let ver = pick_semver(&versions, Some(req)).context("could not select nuget version")?;
         let name = exact
             .map(|(n, _, _)| n.clone())
             .unwrap_or_else(|| spec.name.clone());
@@ -156,11 +154,7 @@ mod tests {
 
     #[test]
     fn nuget_style_pick_skips_prerelease() {
-        let v = vec![
-            "13.0.3".into(),
-            "13.0.4".into(),
-            "13.0.5-beta1".into(),
-        ];
+        let v = vec!["13.0.3".into(), "13.0.4".into(), "13.0.5-beta1".into()];
         assert_eq!(pick_semver(&v, None).as_deref(), Some("13.0.4"));
     }
 }

@@ -77,6 +77,5 @@ pub fn resolve(
     )
 }
 
-pub const NO_REGISTRY_MSG: &str =
-    "zig has no central registry — showing GitHub language:Zig hints (not install pins).\n\
+pub const NO_REGISTRY_MSG: &str = "zig has no central registry — showing GitHub language:Zig hints (not install pins).\n\
      Prefer: rig add --zig path:… | git+… | https://…";

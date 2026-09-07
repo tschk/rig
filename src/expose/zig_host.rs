@@ -62,14 +62,19 @@ pub fn write_zig_bindings(
         "rx4" | "rotary" => {
             body.push_str(
                 "pub extern \"c\" fn rx4_abi_version() u32;\n\
-                 pub extern \"c\" fn rx4_version() [*:0]const u8;\n",
+                 pub extern \"c\" fn rx4_version() [*:0]const u8;\n\
+                 pub extern \"c\" fn rx4_name() [*:0]const u8;\n\
+                 pub extern \"c\" fn rx4_agent_new() ?*anyopaque;\n\
+                 pub extern \"c\" fn rx4_agent_free(agent: ?*anyopaque) void;\n\
+                 pub extern \"c\" fn rx4_prompt_smoke(agent: ?*anyopaque, prompt: [*:0]const u8) i32;\n",
             );
         }
         _ => {
             let safe = name.replace('-', "_");
             body.push_str(&format!(
-                "pub extern \"c\" fn {safe}_rig_abi_version() u32;\n\
-                 pub extern \"c\" fn {safe}_rig_version() [*:0]const u8;\n"
+                "pub extern \"c\" fn {safe}_abi_version() u32;\n\
+                 pub extern \"c\" fn {safe}_version() [*:0]const u8;\n\
+                 pub extern \"c\" fn {safe}_name() [*:0]const u8;\n"
             ));
         }
     }

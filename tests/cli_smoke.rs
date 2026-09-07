@@ -123,6 +123,12 @@ fn add_path_non_cargo_updates_manifest() {
         .stdout(predicate::str::contains("added"));
 
     let manifest = std::fs::read_to_string(dir.path().join("rig.toml")).unwrap();
-    assert!(manifest.contains("mylib"), "manifest should list mylib: {manifest}");
-    assert!(manifest.contains("ecosystem") || manifest.contains("c"), "{manifest}");
+    assert!(
+        manifest.contains("mylib"),
+        "manifest should list mylib: {manifest}"
+    );
+    assert!(
+        manifest.contains("ecosystem") || manifest.contains("c"),
+        "{manifest}"
+    );
 }
