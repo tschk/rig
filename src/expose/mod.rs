@@ -1,4 +1,6 @@
+pub mod c_host;
 pub mod native;
+pub mod nim_host;
 pub mod rust_host;
 pub mod shim;
 pub mod stamp;
@@ -111,9 +113,58 @@ fn expose_one(
                 )?;
             }
         }
+        (Language::Nim, "cargo") => {
+            let built = native::build_cargo_cdylib(ctx, name, resolved, dep)?;
+            let native_rel = dep
+                .expose_opts
+                .as_ref()
+                .and_then(|o| o.native.clone())
+                .unwrap_or_else(|| format!("{}/{}", ctx.manifest.expose.build_dir, name));
+            nim_host::write_nim_bindings(
+                &out_path,
+                name,
+                dep,
+                &built.artifacts.lib_name,
+                &native_rel,
+            )?;
+            if let Some(parent) = out_path.parent() {
+                let _ = std::fs::copy(
+                    &built.artifacts.header,
+                    parent.join(built.artifacts.header.file_name().unwrap()),
+                );
+            }
+        }
+        (Language::C | Language::Cpp, "cargo") => {
+            let built = native::build_cargo_cdylib(ctx, name, resolved, dep)?;
+            let native_rel = dep
+                .expose_opts
+                .as_ref()
+                .and_then(|o| o.native.clone())
+                .unwrap_or_else(|| format!("{}/{}", ctx.manifest.expose.build_dir, name));
+            c_host::write_c_bindings(
+                &out_path,
+                name,
+                dep,
+                Some(&built.artifacts.header),
+                &built.artifacts.lib_name,
+                &native_rel,
+            )?;
+            if let Some(parent) = out_path.parent() {
+                let _ = std::fs::copy(
+                    &built.artifacts.header,
+                    parent.join(built.artifacts.header.file_name().unwrap()),
+                );
+            }
+        }
         (Language::Rust, eco) if eco != "cargo" => {
             rust_host::write_equilibrium_load_stub(&out_path, name, dep, eco)?;
             crate::util::edit::ensure_rust_mod_decl(&ctx.root)?;
+        }
+        (Language::Nim, eco) if eco != "cargo" => {
+            nim_host::write_nim_path_git_stub(&out_path, name, dep)?;
+        }
+        (Language::C | Language::Cpp, eco) if eco != "cargo" => {
+            c_host::write_c_path_git_stub(&out_path, name, dep)?;
         }
         _ => {
             rust_host::write_generic_stub(&out_path, name, dep, consumer)?;

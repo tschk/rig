@@ -47,6 +47,8 @@ Resolves the package, pins it in `rig.toml` / `rig.lock`, and **auto-exposes** a
 
 - **Rust host ← cargo crate:** adds the dep to `Cargo.toml` and generates `src/rig_bindings/<pkg>.rs` (re-export + markers).
 - **Zig host ← cargo crate:** builds a generic `{crate}_ffi` cdylib façade (markers: `{crate}_abi_version` / `_version` / `_name`), writes `src/rig_bindings/<pkg>_bindings.zig`, and patches `build.zig` with `// rig-expose-begin` link markers.
+- **Nim host ← cargo crate:** builds the same façade and writes `src/rig_bindings/<pkg>.nim` (`importc` + `passL` link hints).
+- **C/C++ host ← cargo crate:** builds the same façade and writes `src/rig_bindings/<pkg>.h` (declarations + `-L/-l` metadata macros).
 - **Rust host ← foreign lang:** generates an equilibrium-ffi `load` path stub.
 
 Ecosystem flags (mutually exclusive): `--cargo`/`--rust`, `--zig`, `--nim`, `--c`, `--cpp`, `--v`, `--d`, `--odin`, `--hare`, `--csharp`/`--cs`.
@@ -101,10 +103,11 @@ rig check --fix --full
 rig build
 ```
 
-## Zig host demos
+## Host demos
 
 - [`examples/zig-host-rx4`](examples/zig-host-rx4) — Zig ← `rx4` via thin `rx4_ffi` façade + equilibrium-ffi.
 - [`examples/zig-host-multi`](examples/zig-host-multi) — Zig ← **multiple** cargo crates (`rx4` + `sha2`) via the **generic** façade.
+- [`examples/c-host-sha2`](examples/c-host-sha2) — C ← `sha2` markers via the same façade (`cc` + `-lsha2_ffi`).
 
 ```bash
 cd examples/zig-host-rx4
