@@ -172,7 +172,18 @@ pub fn emit_rust_wrappers(exports: &[ExportFn]) -> String {
             .join(", ");
         let ret = e.ret.rust_ty();
         let unsafe_kw = if e.is_unsafe { "unsafe " } else { "" };
-        let body = if e.is_unsafe || e.params.iter().any(|p| matches!(p.ty, FfiType::ConstCChar | FfiType::MutCChar | FfiType::ConstVoid | FfiType::MutVoid | FfiType::ConstPtr(_) | FfiType::MutPtr(_))) {
+        let body = if e.is_unsafe
+            || e.params.iter().any(|p| {
+                matches!(
+                    p.ty,
+                    FfiType::ConstCChar
+                        | FfiType::MutCChar
+                        | FfiType::ConstVoid
+                        | FfiType::MutVoid
+                        | FfiType::ConstPtr(_)
+                        | FfiType::MutPtr(_)
+                )
+            }) {
             // Pointer-taking wraps: call through; unsafe only when callee is unsafe.
             if e.is_unsafe {
                 format!("unsafe {{ {callee}({args}) }}")

@@ -1,5 +1,4 @@
 pub mod api_scan;
-pub mod surface;
 pub mod c_host;
 pub mod csharp_host;
 pub mod d_host;
@@ -11,6 +10,7 @@ pub mod path_native;
 pub mod rust_host;
 pub mod shim;
 pub mod stamp;
+pub mod surface;
 pub mod v_host;
 pub mod zig_host;
 
@@ -211,8 +211,10 @@ fn expose_one(
             )?;
             copy_header_beside(&out_path, &built.artifacts.header);
         }
-        // Path/git non-cargo: real build+link for c/cpp/zig when feasible.
-        (Language::C | Language::Cpp, eco) if matches!(eco, "c" | "cpp" | "zig") => {
+        // Path/git non-cargo: real build+link when feasible (c/cpp/zig/nim/v/odin/hare).
+        (Language::C | Language::Cpp, eco)
+            if matches!(eco, "c" | "cpp" | "zig" | "nim" | "v" | "odin" | "hare") =>
+        {
             match path_native::build_path_git_lib(ctx, name, dep, resolved) {
                 Ok(built) => {
                     let mut include_names = Vec::new();
@@ -244,16 +246,17 @@ fn expose_one(
                     )?;
                 }
                 Err(err) => {
-                    // Clear, actionable error — do not silently stub when build was requested.
                     bail!(
                         "path/git expose build failed for `{name}` ({eco}): {err}\n\
-                         Use a directory of .c/.cpp/.zig sources (or a Makefile writing $OUT), \
-                         or fix the toolchain error above."
+                         Feasible auto-build: flat sources, Makefile ($OUT), CMakeLists.txt, \
+                         meson.build, or a nim/v/odin/hare/zig tree with the toolchain on PATH."
                     );
                 }
             }
         }
-        (Language::Zig, eco) if matches!(eco, "c" | "cpp" | "zig") => {
+        (Language::Zig, eco)
+            if matches!(eco, "c" | "cpp" | "zig" | "nim" | "v" | "odin" | "hare") =>
+        {
             match path_native::build_path_git_lib(ctx, name, dep, resolved) {
                 Ok(built) => {
                     path_native::write_zig_path_native_bindings(&out_path, name, dep, &built)?;
@@ -275,6 +278,57 @@ fn expose_one(
                 }
             }
         }
+        (Language::Nim, eco)
+            if matches!(eco, "c" | "cpp" | "zig" | "nim" | "v" | "odin" | "hare") =>
+        {
+            match path_native::build_path_git_lib(ctx, name, dep, resolved) {
+                Ok(built) => {
+                    nim_host::write_nim_path_native(&out_path, name, dep, &built)?;
+                }
+                Err(err) => {
+                    bail!(
+                        "path/git expose build failed for `{name}` ({eco}): {err}\n\
+                         Install the matching toolchain or simplify the vendor tree."
+                    );
+                }
+            }
+        }
+        (Language::V, eco)
+            if matches!(eco, "c" | "cpp" | "zig" | "nim" | "v" | "odin" | "hare") =>
+        {
+            match path_native::build_path_git_lib(ctx, name, dep, resolved) {
+                Ok(built) => {
+                    v_host::write_v_path_native(&out_path, name, dep, &built)?;
+                }
+                Err(err) => {
+                    bail!("path/git expose build failed for `{name}` ({eco}): {err}");
+                }
+            }
+        }
+        (Language::Odin, eco)
+            if matches!(eco, "c" | "cpp" | "zig" | "nim" | "v" | "odin" | "hare") =>
+        {
+            match path_native::build_path_git_lib(ctx, name, dep, resolved) {
+                Ok(built) => {
+                    odin_host::write_odin_path_native(&out_path, name, dep, &built)?;
+                }
+                Err(err) => {
+                    bail!("path/git expose build failed for `{name}` ({eco}): {err}");
+                }
+            }
+        }
+        (Language::Hare, eco)
+            if matches!(eco, "c" | "cpp" | "zig" | "nim" | "v" | "odin" | "hare") =>
+        {
+            match path_native::build_path_git_lib(ctx, name, dep, resolved) {
+                Ok(built) => {
+                    hare_host::write_hare_path_native(&out_path, name, dep, &built)?;
+                }
+                Err(err) => {
+                    bail!("path/git expose build failed for `{name}` ({eco}): {err}");
+                }
+            }
+        }
         (Language::Rust, eco) if eco != "cargo" => {
             rust_host::write_equilibrium_load_stub(&out_path, name, dep, eco)?;
             crate::util::edit::ensure_rust_mod_decl(&ctx.root)?;
@@ -283,7 +337,6 @@ fn expose_one(
             nim_host::write_nim_path_git_stub(&out_path, name, dep)?;
         }
         (Language::C | Language::Cpp, eco) if eco != "cargo" => {
-            // Non c/cpp/zig ecosystems on a C host — stub with clear hint.
             c_host::write_c_path_git_stub(&out_path, name, dep)?;
         }
         _ => {

@@ -195,10 +195,7 @@ path = "src/lib.rs"
     std::fs::write(dir.join("Cargo.toml"), cargo_toml)?;
 
     let path_hint = resolve_dep_path(name, resolved, dep);
-    let cache = ctx
-        .root
-        .join(&ctx.manifest.expose.cache)
-        .join("crates");
+    let cache = ctx.root.join(&ctx.manifest.expose.cache).join("crates");
 
     let (lib_rs, header, exports, scan) = match name {
         "rx4" | "rotary" => {
@@ -233,6 +230,15 @@ path = "src/lib.rs"
             (
                 md5_lib_rs(version),
                 header_from_exports("md5", &lib_name, &exports, None),
+                exports,
+                ScanReport::default(),
+            )
+        }
+        "hex" => {
+            let exports = hex_exports();
+            (
+                hex_lib_rs(version),
+                header_from_exports("hex", &lib_name, &exports, None),
                 exports,
                 ScanReport::default(),
             )
@@ -279,12 +285,7 @@ fn build_generic_surface(
         wraps = scan
             .exports
             .iter()
-            .filter(|e| {
-                matches!(
-                    e.kind,
-                    ExportKind::AutoWrap | ExportKind::UpstreamExternC
-                )
-            })
+            .filter(|e| matches!(e.kind, ExportKind::AutoWrap | ExportKind::UpstreamExternC))
             .take(MAX_AUTO)
             .cloned()
             .collect();
@@ -311,12 +312,7 @@ fn scan_note(scan: &ScanReport) -> String {
     let callable = scan
         .exports
         .iter()
-        .filter(|e| {
-            matches!(
-                e.kind,
-                ExportKind::AutoWrap | ExportKind::UpstreamExternC
-            )
-        })
+        .filter(|e| matches!(e.kind, ExportKind::AutoWrap | ExportKind::UpstreamExternC))
         .count();
     format!(
         "auto-wrap: {callable} callable; skipped generics={} async={} unfriendly={} impl_methods={}",
@@ -887,7 +883,6 @@ pub extern "C" fn crc32fast_hash(data: *const u8, len: usize) -> u32 {{
     )
 }
 
-
 fn md5_lib_rs(version: &str) -> String {
     format!(
         r#"//! rig-generated C ABI façade for `md-5` (markers + MD5 helper).
@@ -936,9 +931,177 @@ pub extern "C" fn md5_hash(data: *const u8, len: usize, out: *mut u8) -> i32 {{
     )
 }
 
+fn hex_exports() -> Vec<ExportFn> {
+    let mut v = marker_exports("hex", "");
+    v.push(ExportFn {
+        export_name: "hex_encode_len".into(),
+        rust_callee: None,
+        params: vec![Param {
+            name: "len".into(),
+            ty: FfiType::Usize,
+        }],
+        ret: FfiType::Usize,
+        kind: ExportKind::Enrichment,
+        is_unsafe: false,
+    });
+    v.push(ExportFn {
+        export_name: "hex_encode".into(),
+        rust_callee: None,
+        params: vec![
+            Param {
+                name: "data".into(),
+                ty: FfiType::ConstPtr(Box::new(FfiType::U8)),
+            },
+            Param {
+                name: "len".into(),
+                ty: FfiType::Usize,
+            },
+            Param {
+                name: "out".into(),
+                ty: FfiType::MutPtr(Box::new(FfiType::U8)),
+            },
+            Param {
+                name: "out_len".into(),
+                ty: FfiType::Usize,
+            },
+        ],
+        ret: FfiType::I32,
+        kind: ExportKind::Enrichment,
+        is_unsafe: false,
+    });
+    v.push(ExportFn {
+        export_name: "hex_decode".into(),
+        rust_callee: None,
+        params: vec![
+            Param {
+                name: "data".into(),
+                ty: FfiType::ConstPtr(Box::new(FfiType::U8)),
+            },
+            Param {
+                name: "len".into(),
+                ty: FfiType::Usize,
+            },
+            Param {
+                name: "out".into(),
+                ty: FfiType::MutPtr(Box::new(FfiType::U8)),
+            },
+            Param {
+                name: "out_len".into(),
+                ty: FfiType::Usize,
+            },
+        ],
+        ret: FfiType::I32,
+        kind: ExportKind::Enrichment,
+        is_unsafe: false,
+    });
+    v
+}
+
+fn hex_lib_rs(version: &str) -> String {
+    format!(
+        r#"//! rig-generated C ABI façade for `hex` (markers + encode/decode helpers).
+
+use std::os::raw::c_char;
+use std::slice;
+
+#[no_mangle]
+pub extern "C" fn hex_abi_version() -> u32 {{
+    2
+}}
+
+#[no_mangle]
+pub extern "C" fn hex_version() -> *const c_char {{
+    concat!("{version}", "\0").as_ptr() as *const c_char
+}}
+
+#[no_mangle]
+pub extern "C" fn hex_name() -> *const c_char {{
+    b"hex\0".as_ptr() as *const c_char
+}}
+
+/// Bytes needed to hex-encode `len` input bytes (no NUL).
+#[no_mangle]
+pub extern "C" fn hex_encode_len(len: usize) -> usize {{
+    len.saturating_mul(2)
+}}
+
+/// Hex-encode `len` bytes at `data` into `out` (must be >= 2*len).
+/// Returns 0 ok; -1 null data; -2 null out; -3 out_len too small.
+#[no_mangle]
+pub extern "C" fn hex_encode(
+    data: *const u8,
+    len: usize,
+    out: *mut u8,
+    out_len: usize,
+) -> i32 {{
+    if out.is_null() {{
+        return -2;
+    }}
+    if len > 0 && data.is_null() {{
+        return -1;
+    }}
+    let need = len.saturating_mul(2);
+    if out_len < need {{
+        return -3;
+    }}
+    let input = if len == 0 {{
+        &[][..]
+    }} else {{
+        unsafe {{ slice::from_raw_parts(data, len) }}
+    }};
+    let encoded = hex::encode(input);
+    unsafe {{
+        slice::from_raw_parts_mut(out, need).copy_from_slice(encoded.as_bytes());
+    }}
+    0
+}}
+
+/// Hex-decode `len` ASCII hex bytes at `data` into `out` (must be >= len/2).
+/// Returns 0 ok; -1 null data; -2 null out; -3 out_len too small; -4 invalid hex.
+#[no_mangle]
+pub extern "C" fn hex_decode(
+    data: *const u8,
+    len: usize,
+    out: *mut u8,
+    out_len: usize,
+) -> i32 {{
+    if out.is_null() {{
+        return -2;
+    }}
+    if len > 0 && data.is_null() {{
+        return -1;
+    }}
+    let need = len / 2;
+    if out_len < need {{
+        return -3;
+    }}
+    let input = if len == 0 {{
+        &[][..]
+    }} else {{
+        unsafe {{ slice::from_raw_parts(data, len) }}
+    }};
+    match hex::decode(input) {{
+        Ok(bytes) => {{
+            unsafe {{
+                slice::from_raw_parts_mut(out, bytes.len()).copy_from_slice(&bytes);
+            }}
+            0
+        }}
+        Err(_) => -4,
+    }}
+}}
+"#
+    )
+}
+
 /// Generate generic façade `lib.rs` for an arbitrary cargo package (markers only).
 pub fn generic_lib_rs(name: &str, version: &str) -> String {
-    generic_lib_rs_with_wraps(name, version, &marker_exports(name, version), "markers only")
+    generic_lib_rs_with_wraps(
+        name,
+        version,
+        &marker_exports(name, version),
+        "markers only",
+    )
 }
 
 fn generic_lib_rs_with_wraps(
@@ -948,12 +1111,10 @@ fn generic_lib_rs_with_wraps(
     note: &str,
 ) -> String {
     let safe = crate_ident(name);
-    let abi = if exports.iter().any(|e| {
-        matches!(
-            e.kind,
-            ExportKind::AutoWrap | ExportKind::UpstreamExternC
-        )
-    }) {
+    let abi = if exports
+        .iter()
+        .any(|e| matches!(e.kind, ExportKind::AutoWrap | ExportKind::UpstreamExternC))
+    {
         2
     } else {
         1
@@ -1114,6 +1275,18 @@ mod tests {
         assert!(lib.contains("Md5::digest"));
         let exports = md5_exports();
         assert!(exports.iter().any(|e| e.export_name == "md5_hash"));
+    }
+
+    #[test]
+    fn hex_enrichment_exports_encode_decode() {
+        let lib = hex_lib_rs("0.4.3");
+        assert!(lib.contains("fn hex_abi_version"));
+        assert!(lib.contains("fn hex_encode"));
+        assert!(lib.contains("fn hex_decode"));
+        assert!(lib.contains("hex::encode"));
+        let exports = hex_exports();
+        assert!(exports.iter().any(|e| e.export_name == "hex_encode"));
+        assert!(exports.iter().any(|e| e.export_name == "hex_decode"));
     }
 
     #[test]

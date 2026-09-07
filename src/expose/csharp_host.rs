@@ -92,7 +92,6 @@ pub fn write_csharp_bindings(
         );
     }
 
-
     body.push_str("}\n");
     std::fs::write(out, body).with_context(|| format!("write {}", out.display()))?;
     Ok(())
@@ -183,8 +182,15 @@ mod tests {
                 is_unsafe: false,
             },
         ];
-        write_csharp_bindings(&out, "sha2", &dep("0.10.9"), "sha2_ffi", "target/rig/sha2", &exports)
-            .unwrap();
+        write_csharp_bindings(
+            &out,
+            "sha2",
+            &dep("0.10.9"),
+            "sha2_ffi",
+            "target/rig/sha2",
+            &exports,
+        )
+        .unwrap();
         let text = std::fs::read_to_string(&out).unwrap();
         assert!(text.contains("DllImport(\"sha2_ffi\""));
         assert!(text.contains("sha2_abi_version"));

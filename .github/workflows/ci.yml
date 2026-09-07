@@ -27,6 +27,19 @@ jobs:
       - name: test
         run: cargo test --all
 
+  # Optional smoke: C path/git (+ cmake when available). No exotic toolchains required.
+  path-c-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: install cmake/ninja (apt)
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+      - name: build rig
+        run: cargo build --release
+      - name: smoke path C + cmake fixtures
+        run: bash scripts/ci-smoke-path-c.sh
+
   windows:
     runs-on: windows-latest
     steps:

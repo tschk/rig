@@ -205,7 +205,10 @@ fn add_path_c_empty_dir_errors_clearly() {
         .args(["add", "--c", &path_spec])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("path/git expose build failed").or(predicate::str::contains("no compilable")));
+        .stderr(
+            predicate::str::contains("path/git expose build failed")
+                .or(predicate::str::contains("no compilable")),
+        );
 }
 
 #[test]
@@ -263,4 +266,114 @@ pub fn build(b: *std.Build) void {
             && (n.ends_with(".dylib") || n.ends_with(".so") || n.ends_with(".dll"))
     });
     assert!(has_lib, "expected built zmath_native shared lib");
+}
+
+#[test]
+fn add_path_c_cmake_builds_native() {
+    // Skip quietly when cmake is unavailable (windows CI without cmake, etc.).
+    if std::process::Command::new("cmake")
+        .arg("--version")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
+        eprintln!("skip: cmake not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Makefile"), "all:\n\t@echo ok\n").unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/main.c"), "int main(void){return 0;}\n").unwrap();
+
+    let vendor = dir.path().join("vendor/cmlib");
+    std::fs::create_dir_all(&vendor).unwrap();
+    std::fs::write(
+        vendor.join("CMakeLists.txt"),
+        "cmake_minimum_required(VERSION 3.16)\n\
+         project(cmlib C)\n\
+         add_library(cmlib SHARED cmlib.c)\n\
+         set_target_properties(cmlib PROPERTIES OUTPUT_NAME \"cmlib_native\")\n",
+    )
+    .unwrap();
+    std::fs::write(
+        vendor.join("cmlib.h"),
+        "#pragma once\nint cmlib_add(int a, int b);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        vendor.join("cmlib.c"),
+        "#include \"cmlib.h\"\nint cmlib_add(int a, int b) { return a + b; }\n",
+    )
+    .unwrap();
+
+    rig()
+        .current_dir(dir.path())
+        .args(["init"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("host: c"));
+
+    let path_spec = format!("path:{}", vendor.display());
+    rig()
+        .current_dir(dir.path())
+        .args(["add", "--c", &path_spec])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("added"));
+
+    let header = dir.path().join("src/rig_bindings/cmlib.h");
+    assert!(header.is_file(), "expected expose header");
+    let text = std::fs::read_to_string(&header).unwrap();
+    assert!(text.contains("RIG_NATIVE_LIB_cmlib"), "{text}");
+
+    let native = dir.path().join("target/rig/cmlib");
+    let has_lib = std::fs::read_dir(&native).unwrap().any(|e| {
+        let n = e.unwrap().file_name().to_string_lossy().into_owned();
+        n.contains("cmlib_native")
+            && (n.ends_with(".dylib") || n.ends_with(".so") || n.ends_with(".dll"))
+    });
+    assert!(has_lib, "expected built cmlib_native shared lib via cmake");
+}
+
+#[test]
+fn add_path_hare_missing_toolchain_is_honest() {
+    // Only assert the honest error path when `hare` is absent.
+    if std::process::Command::new("sh")
+        .args(["-c", "command -v hare >/dev/null 2>&1"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        eprintln!("skip: hare present on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Makefile"), "all:\n\t@echo ok\n").unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/main.c"), "int main(void){return 0;}\n").unwrap();
+
+    let vendor = dir.path().join("vendor/harelib");
+    std::fs::create_dir_all(&vendor).unwrap();
+    std::fs::write(
+        vendor.join("main.ha"),
+        "export fn add(a: int, b: int) int = a + b;\n",
+    )
+    .unwrap();
+
+    rig()
+        .current_dir(dir.path())
+        .args(["init"])
+        .assert()
+        .success();
+
+    let path_spec = format!("path:{}", vendor.display());
+    rig()
+        .current_dir(dir.path())
+        .args(["add", "--hare", &path_spec])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("hare")
+                .and(predicate::str::contains("not found").or(predicate::str::contains("PATH"))),
+        );
 }

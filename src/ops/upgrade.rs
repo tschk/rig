@@ -75,10 +75,7 @@ pub fn run(args: &UpgradeArgs, g: &Globals) -> Result<u8> {
             )
         } else {
             let current = dep.version.as_deref().unwrap_or("?");
-            println!(
-                "{name:20} {current:12} → (re-resolve {})",
-                dep.ecosystem
-            );
+            println!("{name:20} {current:12} → (re-resolve {})", dep.ecosystem);
             (
                 name.clone(),
                 dep.features.as_ref().map(|f| f.join(",")),

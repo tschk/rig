@@ -1,4 +1,8 @@
-//! Build path/git non-cargo deps (c / cpp / zig) into `target/rig/<pkg>/` when feasible.
+//! Build path/git non-cargo deps into `target/rig/<pkg>/` when feasible.
+//!
+//! Supported ecosystems: c, cpp, zig, nim, v, odin, hare.
+//! Build drivers (in order for C/C++): Makefile `$OUT` → CMake → meson → flat sources.
+//! Honest errors when a required toolchain is missing.
 
 use crate::manifest::Dependency;
 use crate::resolve::ResolvedPackage;
@@ -17,6 +21,8 @@ pub struct PathNativeBuild {
     pub source_root: PathBuf,
 }
 
+const PATH_GIT_ECOSYSTEMS: &[&str] = &["c", "cpp", "zig", "nim", "v", "odin", "hare"];
+
 /// Resolve source tree for a path/git pin, build a shared library when feasible,
 /// install into expose `build_dir`, and return link metadata.
 pub fn build_path_git_lib(
@@ -26,9 +32,10 @@ pub fn build_path_git_lib(
     resolved: Option<&ResolvedPackage>,
 ) -> Result<PathNativeBuild> {
     let eco = dep.ecosystem.as_str();
-    if !matches!(eco, "c" | "cpp" | "zig") {
+    if !PATH_GIT_ECOSYSTEMS.contains(&eco) {
         bail!(
-            "path/git native build only supports c/cpp/zig ecosystems (got `{eco}` for `{name}`)"
+            "path/git native build supports {} (got `{eco}` for `{name}`)",
+            PATH_GIT_ECOSYSTEMS.join("/")
         );
     }
 
@@ -56,7 +63,12 @@ pub fn build_path_git_lib(
     match eco {
         "zig" => build_zig_shared(&source_root, name, &lib_name, &dylib)?,
         "cpp" => build_cc_family(&source_root, name, &lib_name, &dylib, true)?,
-        _ => build_cc_family(&source_root, name, &lib_name, &dylib, false)?,
+        "c" => build_cc_family(&source_root, name, &lib_name, &dylib, false)?,
+        "nim" => build_nim_shared(&source_root, name, &lib_name, &dylib)?,
+        "v" => build_v_shared(&source_root, name, &lib_name, &dylib)?,
+        "odin" => build_odin_shared(&source_root, name, &lib_name, &dylib)?,
+        "hare" => build_hare_shared(&source_root, name, &lib_name, &dylib)?,
+        _ => unreachable!(),
     }
 
     if !dylib.is_file() {
@@ -120,7 +132,6 @@ fn locate_or_fetch_path_git(
         .join("git")
         .join(name);
     if cache.join(".git").is_dir() {
-        // Best-effort refresh; ignore failures (offline / dirty).
         let _ = Command::new("git")
             .args(["-C"])
             .arg(&cache)
@@ -162,6 +173,38 @@ fn shared_lib_path(dir: &Path, lib_name: &str) -> PathBuf {
     }
 }
 
+fn toolchain_on_path(bin: &str) -> bool {
+    Command::new(bin)
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+        || Command::new(bin)
+            .arg("version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        || which_exists(bin)
+}
+
+fn which_exists(bin: &str) -> bool {
+    Command::new("sh")
+        .args(["-c", &format!("command -v {bin} >/dev/null 2>&1")])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn require_toolchain(bin: &str, eco: &str, name: &str) -> Result<()> {
+    if which_exists(bin) {
+        return Ok(());
+    }
+    bail!(
+        "`{bin}` not found on PATH — cannot build path/git `{name}` ({eco}).\n\
+         Install the {eco} toolchain, or vendor a prebuilt shared library and point path: at it."
+    )
+}
+
 fn build_cc_family(
     source_root: &Path,
     name: &str,
@@ -182,34 +225,23 @@ fn build_cc_family(
         if status.success() && out.is_file() {
             return Ok(());
         }
-        // Fall through to direct compile when make doesn't produce OUT.
+        // Fall through when make doesn't produce OUT.
     }
 
     if source_root.join("CMakeLists.txt").is_file() {
-        bail!(
-            "path/git `{name}` has CMakeLists.txt but no simple shared-lib recipe.\n\
-             Feasible auto-build today: flat .c/.cpp sources or a Makefile that writes $OUT.\n\
-             Build the library yourself and point path: at the artifact dir, or add a Makefile."
-        );
+        return build_cmake_shared(source_root, name, lib_name, out);
     }
     if source_root.join("meson.build").is_file() {
-        bail!(
-            "path/git `{name}` uses meson; rig does not auto-drive meson yet.\n\
-             Add a Makefile that builds a shared lib to $OUT, or vendor a prebuilt .so/.dylib."
-        );
+        return build_meson_shared(source_root, name, lib_name, out);
     }
 
-    let exts: &[&str] = if cpp {
-        &["cpp", "cxx", "cc"]
-    } else {
-        &["c"]
-    };
+    let exts: &[&str] = if cpp { &["cpp", "cxx", "cc"] } else { &["c"] };
     let mut sources = Vec::new();
     collect_sources(source_root, exts, &mut sources, 3)?;
     if sources.is_empty() {
         bail!(
             "no compilable {} sources found under {} for `{name}`.\n\
-             Expected *.{} (depth ≤3), or a Makefile that emits $OUT.",
+             Expected *.{} (depth ≤3), a Makefile that emits $OUT, CMakeLists.txt, or meson.build.",
             if cpp { "C++" } else { "C" },
             source_root.display(),
             exts.join("/"),
@@ -242,7 +274,7 @@ fn build_cc_family(
         bail!(
             "{compiler} failed building shared lib for `{name}` from {} (status {status}).\n\
              Sources: {}\n\
-             Fix compile errors locally, or provide a Makefile that writes $OUT.",
+             Fix compile errors locally, or provide a Makefile / CMakeLists.txt / meson.build.",
             source_root.display(),
             sources
                 .iter()
@@ -254,12 +286,193 @@ fn build_cc_family(
     Ok(())
 }
 
-fn build_zig_shared(
-    source_root: &Path,
-    name: &str,
-    lib_name: &str,
-    out: &Path,
-) -> Result<()> {
+/// Drive CMake with BUILD_SHARED_LIBS and copy the produced shared lib to `out`.
+fn build_cmake_shared(source_root: &Path, name: &str, lib_name: &str, out: &Path) -> Result<()> {
+    require_toolchain("cmake", "c/cpp (cmake)", name)?;
+    let build_dir = source_root.join(".rig-cmake-build");
+    let status = Command::new("cmake")
+        .arg("-S")
+        .arg(source_root)
+        .arg("-B")
+        .arg(&build_dir)
+        .arg("-DBUILD_SHARED_LIBS=ON")
+        .arg("-DCMAKE_BUILD_TYPE=Release")
+        .arg(format!(
+            "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={}",
+            out.parent().unwrap_or(out).display()
+        ))
+        .arg(format!(
+            "-DCMAKE_RUNTIME_OUTPUT_DIRECTORY={}",
+            out.parent().unwrap_or(out).display()
+        ))
+        .status()
+        .context("spawn cmake configure")?;
+    if !status.success() {
+        bail!(
+            "cmake configure failed for path/git `{name}` in {} (status {status}).\n\
+             Ensure CMakeLists.txt can build a shared library with -DBUILD_SHARED_LIBS=ON.\n\
+             Partial support: flat .c/.cpp or a Makefile writing $OUT also work.",
+            source_root.display()
+        );
+    }
+    let mut build = Command::new("cmake");
+    build
+        .arg("--build")
+        .arg(&build_dir)
+        .arg("--config")
+        .arg("Release");
+    if which_exists("ninja") || build_dir.join("build.ninja").is_file() {
+        // parallel by default via cmake --build
+    }
+    let status = build.status().context("spawn cmake --build")?;
+    if !status.success() {
+        bail!(
+            "cmake --build failed for path/git `{name}` (status {status}).\n\
+             Inspect {} and fix the project, or add a Makefile that writes $OUT.",
+            build_dir.display()
+        );
+    }
+    if out.is_file() {
+        return Ok(());
+    }
+    if let Some(found) =
+        find_shared_lib(&build_dir, Some(lib_name)).or_else(|| find_shared_lib(&build_dir, None))
+    {
+        std::fs::copy(&found, out)
+            .with_context(|| format!("copy {} → {}", found.display(), out.display()))?;
+        return Ok(());
+    }
+    // Also check output directory parent in case CMAKE_*_OUTPUT_DIRECTORY landed beside out.
+    if let Some(parent) = out.parent()
+        && let Some(found) =
+            find_shared_lib(parent, Some(lib_name)).or_else(|| find_shared_lib(parent, None))
+        && found != out
+    {
+        std::fs::copy(&found, out)
+            .with_context(|| format!("copy {} → {}", found.display(), out.display()))?;
+        return Ok(());
+    }
+    bail!(
+        "cmake build for `{name}` succeeded but no shared library (.so/.dylib/.dll) was found under {}.\n\
+         Tip: add `add_library(… SHARED …)` or set BUILD_SHARED_LIBS, or provide a Makefile that writes $OUT.\n\
+         Static-only CMake projects are not auto-linked yet.",
+        build_dir.display()
+    )
+}
+
+fn build_meson_shared(source_root: &Path, name: &str, lib_name: &str, out: &Path) -> Result<()> {
+    require_toolchain("meson", "c/cpp (meson)", name)?;
+    if !which_exists("ninja") && !toolchain_on_path("ninja") {
+        // meson typically needs ninja
+        if !which_exists("ninja") {
+            bail!(
+                "`meson.build` present for `{name}` but `ninja` not on PATH (required by meson).\n\
+                 Install ninja, or add a Makefile that writes $OUT."
+            );
+        }
+    }
+    let build_dir = source_root.join(".rig-meson-build");
+    if !build_dir.join("build.ninja").is_file() {
+        let status = Command::new("meson")
+            .args(["setup", "--buildtype=release", "-Ddefault_library=shared"])
+            .arg(&build_dir)
+            .arg(source_root)
+            .status()
+            .context("spawn meson setup")?;
+        if !status.success() {
+            // Retry without default_library (option may not exist).
+            let _ = std::fs::remove_dir_all(&build_dir);
+            let status = Command::new("meson")
+                .args(["setup", "--buildtype=release"])
+                .arg(&build_dir)
+                .arg(source_root)
+                .status()
+                .context("spawn meson setup (retry)")?;
+            if !status.success() {
+                bail!(
+                    "meson setup failed for path/git `{name}` in {} (status {status}).\n\
+                     Ensure meson.build can produce a shared library, or add a Makefile writing $OUT.",
+                    source_root.display()
+                );
+            }
+        }
+    }
+    let status = Command::new("meson")
+        .args(["compile", "-C"])
+        .arg(&build_dir)
+        .status()
+        .context("spawn meson compile")?;
+    if !status.success() {
+        bail!(
+            "meson compile failed for path/git `{name}` (status {status}).\n\
+             Inspect {} or provide a Makefile that writes $OUT.",
+            build_dir.display()
+        );
+    }
+    if out.is_file() {
+        return Ok(());
+    }
+    if let Some(found) =
+        find_shared_lib(&build_dir, Some(lib_name)).or_else(|| find_shared_lib(&build_dir, None))
+    {
+        std::fs::copy(&found, out)
+            .with_context(|| format!("copy {} → {}", found.display(), out.display()))?;
+        return Ok(());
+    }
+    bail!(
+        "meson build for `{name}` succeeded but no shared library was found under {}.\n\
+         Tip: use `library(..., install: true)` with shared default, or a Makefile writing $OUT.",
+        build_dir.display()
+    )
+}
+
+fn find_shared_lib(root: &Path, prefer_name: Option<&str>) -> Option<PathBuf> {
+    let mut found: Vec<PathBuf> = Vec::new();
+    let _ = walk_shared(root, &mut found, 0, 6);
+    if let Some(want) = prefer_name
+        && let Some(p) = found.iter().find(|p| {
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .map(|n| n.contains(want))
+                .unwrap_or(false)
+        })
+    {
+        return Some(p.clone());
+    }
+    found.into_iter().next()
+}
+
+fn walk_shared(dir: &Path, out: &mut Vec<PathBuf>, depth: usize, max_depth: usize) -> Result<()> {
+    if depth > max_depth || !dir.is_dir() {
+        return Ok(());
+    }
+    for ent in std::fs::read_dir(dir)? {
+        let ent = ent?;
+        let path = ent.path();
+        let name = ent.file_name();
+        let name = name.to_string_lossy();
+        if name == "." || name == ".." || name == ".git" {
+            continue;
+        }
+        if path.is_dir() {
+            walk_shared(&path, out, depth + 1, max_depth)?;
+        } else if is_shared_lib_name(&name) {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn is_shared_lib_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".dylib")
+        || lower.ends_with(".so")
+        || lower.contains(".so.")
+        || lower.ends_with(".dll")
+}
+
+fn build_zig_shared(source_root: &Path, name: &str, lib_name: &str, out: &Path) -> Result<()> {
+    require_toolchain("zig", "zig", name)?;
     if source_root.join("build.zig").is_file() {
         let status = Command::new("zig")
             .args(["build", "-Doptimize=ReleaseFast"])
@@ -273,13 +486,12 @@ fn build_zig_shared(
                 source_root.display()
             );
         }
-        // Prefer zig-out/lib/* then copy.
         let zig_out = source_root.join("zig-out/lib");
         if zig_out.is_dir() {
             for ent in std::fs::read_dir(&zig_out)?.flatten() {
                 let p = ent.path();
                 let n = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                if n.contains(".so") || n.contains(".dylib") || n.ends_with(".dll") {
+                if is_shared_lib_name(n) {
                     std::fs::copy(&p, out)
                         .with_context(|| format!("copy {} → {}", p.display(), out.display()))?;
                     return Ok(());
@@ -292,10 +504,8 @@ fn build_zig_shared(
         );
     }
 
-    // Single-file / multi-file: zig build-lib -dynamic
     let mut sources = Vec::new();
     collect_sources(source_root, &["zig"], &mut sources, 2)?;
-    // Prefer root-level .zig that isn't build.zig
     sources.retain(|p| {
         p.file_name()
             .and_then(|s| s.to_str())
@@ -333,8 +543,212 @@ fn build_zig_shared(
     Ok(())
 }
 
-fn collect_sources(root: &Path, exts: &[&str], out: &mut Vec<PathBuf>, max_depth: usize) -> Result<()> {
-    fn walk(dir: &Path, exts: &[&str], out: &mut Vec<PathBuf>, depth: usize, max_depth: usize) -> Result<()> {
+fn build_nim_shared(source_root: &Path, name: &str, lib_name: &str, out: &Path) -> Result<()> {
+    require_toolchain("nim", "nim", name)?;
+    let root = pick_source(source_root, &["nim"], &["src"])?;
+    // nim c --app:lib writes libfoo.dylib / libfoo.so next to -o basename rules vary;
+    // pass full path via -o:
+    let status = Command::new("nim")
+        .args([
+            "c",
+            "--app:lib",
+            "--noMain",
+            "-d:release",
+            "--opt:speed",
+            "--nimcache:.rig-nimcache",
+        ])
+        .arg(format!("-o:{}", out.display()))
+        .arg(&root)
+        .current_dir(source_root)
+        .status()
+        .context("spawn nim c --app:lib")?;
+    if !status.success() {
+        bail!(
+            "nim failed building shared lib for `{name}` from {} (status {status}).\n\
+             Export `{{.exportc.}}` procs for a C ABI, or fix compile errors.",
+            root.display()
+        );
+    }
+    if out.is_file() {
+        return Ok(());
+    }
+    // Nim sometimes drops the lib prefix / places beside source.
+    if let Some(found) = find_shared_lib(source_root, Some(lib_name))
+        .or_else(|| find_shared_lib(source_root, Some(name)))
+        .or_else(|| find_shared_lib(out.parent().unwrap_or(source_root), None))
+    {
+        if found != out {
+            std::fs::copy(&found, out)
+                .with_context(|| format!("copy {} → {}", found.display(), out.display()))?;
+        }
+        return Ok(());
+    }
+    bail!(
+        "nim build for `{name}` reported success but shared lib not at {}.\n\
+         Check nim --app:lib output naming on this platform.",
+        out.display()
+    )
+}
+
+fn build_v_shared(source_root: &Path, name: &str, lib_name: &str, out: &Path) -> Result<()> {
+    require_toolchain("v", "v", name)?;
+    let root = pick_source(source_root, &["v"], &["src"])?;
+    // `v -shared -o <path>` — on Unix produces the given path when it has an extension.
+    let status = Command::new("v")
+        .args(["-shared", "-prod", "-o"])
+        .arg(out)
+        .arg(&root)
+        .current_dir(source_root)
+        .status()
+        .context("spawn v -shared")?;
+    if !status.success() {
+        bail!(
+            "v failed building shared lib for `{name}` from {} (status {status}).\n\
+             Use `__global` / `[export_name]` C exports as needed.",
+            root.display()
+        );
+    }
+    if out.is_file() {
+        return Ok(());
+    }
+    if let Some(found) = find_shared_lib(source_root, Some(lib_name))
+        .or_else(|| find_shared_lib(out.parent().unwrap_or(source_root), None))
+    {
+        if found != out {
+            std::fs::copy(&found, out)?;
+        }
+        return Ok(());
+    }
+    bail!(
+        "v -shared for `{name}` succeeded but no shared library at {}.",
+        out.display()
+    )
+}
+
+fn build_odin_shared(source_root: &Path, name: &str, lib_name: &str, out: &Path) -> Result<()> {
+    require_toolchain("odin", "odin", name)?;
+    // odin build <pkg> -build-mode:shared -out:<path without requiring extension handling>
+    let out_stem = out.with_extension("");
+    // Prefer package dir; else a single .odin file's parent.
+    let pkg = if source_root.join("main.odin").is_file()
+        || source_root
+            .read_dir()
+            .ok()
+            .map(|d| {
+                d.flatten().any(|e| {
+                    e.path()
+                        .extension()
+                        .and_then(|x| x.to_str())
+                        .map(|x| x == "odin")
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    {
+        source_root.to_path_buf()
+    } else if source_root.join("src").is_dir() {
+        source_root.join("src")
+    } else {
+        source_root.to_path_buf()
+    };
+
+    let status = Command::new("odin")
+        .arg("build")
+        .arg(&pkg)
+        .arg("-build-mode:shared")
+        .arg(format!("-out:{}", out_stem.display()))
+        .current_dir(source_root)
+        .status()
+        .context("spawn odin build -build-mode:shared")?;
+    if !status.success() {
+        bail!(
+            "odin failed building shared lib for `{name}` from {} (status {status}).\n\
+             Export procs with `@(export)` for a C ABI.",
+            pkg.display()
+        );
+    }
+    if out.is_file() {
+        return Ok(());
+    }
+    // Odin may append platform suffix to -out stem.
+    if let Some(found) = find_shared_lib(out.parent().unwrap_or(source_root), Some(lib_name))
+        .or_else(|| find_shared_lib(source_root, Some(lib_name)))
+        .or_else(|| find_shared_lib(out.parent().unwrap_or(source_root), None))
+    {
+        if found != out {
+            std::fs::copy(&found, out)?;
+        }
+        return Ok(());
+    }
+    bail!(
+        "odin build for `{name}` succeeded but shared lib not at {}.",
+        out.display()
+    )
+}
+
+fn build_hare_shared(source_root: &Path, name: &str, _lib_name: &str, out: &Path) -> Result<()> {
+    require_toolchain("hare", "hare", name)?;
+    let root = pick_source(source_root, &["ha"], &["src"])?;
+    let status = Command::new("hare")
+        .args(["build", "-o"])
+        .arg(out)
+        .arg(&root)
+        .current_dir(source_root)
+        .status()
+        .context("spawn hare build")?;
+    if !status.success() {
+        bail!(
+            "hare build failed for `{name}` from {} (status {status}).\n\
+             Note: Hare shared-lib support is toolchain-dependent; prefer exporting a C ABI object.",
+            root.display()
+        );
+    }
+    if !out.is_file() {
+        bail!(
+            "hare build for `{name}` succeeded but output missing at {}.\n\
+             Hare path/git shared-lib drive is best-effort; vendor a .so if needed.",
+            out.display()
+        );
+    }
+    Ok(())
+}
+
+fn pick_source(root: &Path, exts: &[&str], subdirs: &[&str]) -> Result<PathBuf> {
+    // Prefer root-level source matching package-ish names.
+    let mut sources = Vec::new();
+    collect_sources(root, exts, &mut sources, 2)?;
+    if sources.is_empty() {
+        bail!(
+            "no *.{} sources found under {} (depth ≤2).",
+            exts.join("/"),
+            root.display()
+        );
+    }
+    if let Some(p) = sources.iter().find(|p| p.parent() == Some(root)) {
+        return Ok(p.clone());
+    }
+    for sub in subdirs {
+        let d = root.join(sub);
+        if let Some(p) = sources.iter().find(|p| p.parent() == Some(&d)) {
+            return Ok(p.clone());
+        }
+    }
+    Ok(sources[0].clone())
+}
+
+fn collect_sources(
+    root: &Path,
+    exts: &[&str],
+    out: &mut Vec<PathBuf>,
+    max_depth: usize,
+) -> Result<()> {
+    fn walk(
+        dir: &Path,
+        exts: &[&str],
+        out: &mut Vec<PathBuf>,
+        depth: usize,
+        max_depth: usize,
+    ) -> Result<()> {
         if depth > max_depth {
             return Ok(());
         }
@@ -343,7 +757,14 @@ fn collect_sources(root: &Path, exts: &[&str], out: &mut Vec<PathBuf>, max_depth
             let path = ent.path();
             let name = ent.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with('.') || name == "target" || name == "zig-out" || name == ".zig-cache" {
+            if name.starts_with('.')
+                || name == "target"
+                || name == "zig-out"
+                || name == ".zig-cache"
+                || name == ".rig-cmake-build"
+                || name == ".rig-meson-build"
+                || name == ".rig-nimcache"
+            {
                 continue;
             }
             if path.is_dir() {
@@ -394,7 +815,7 @@ pub fn write_c_path_native_header(
     if include_names.is_empty() {
         body.push_str(&format!(
             "/* No public headers discovered under {}. */\n\
-             /* Declare extern symbols that your .c/.cpp exports. */\n",
+             /* Declare extern symbols that your sources export. */\n",
             built.source_root.display()
         ));
     }
@@ -444,6 +865,17 @@ pub fn write_zig_path_native_bindings(
     Ok(())
 }
 
+/// Shared link-meta binder text used by Nim/V/Odin/Hare path-native writers.
+pub fn path_native_meta_comment(name: &str, dep: &Dependency, built: &PathNativeBuild) -> String {
+    format!(
+        "path/git `{name}` ({eco}) → {lib} @ {dir} (src: {src})",
+        eco = dep.ecosystem,
+        lib = built.lib_name,
+        dir = built.native_rel,
+        src = built.source_root.display(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,5 +890,76 @@ mod tests {
         let mut srcs = Vec::new();
         collect_sources(dir.path(), &["c"], &mut srcs, 3).unwrap();
         assert_eq!(srcs.len(), 2);
+    }
+
+    #[test]
+    fn cmake_simple_shared_builds_when_toolchain_present() {
+        if !which_exists("cmake") || !which_exists("cc") {
+            eprintln!("skip: cmake/cc missing");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("CMakeLists.txt"),
+            "cmake_minimum_required(VERSION 3.16)\n\
+             project(demo C)\n\
+             add_library(demo SHARED demo.c)\n\
+             set_target_properties(demo PROPERTIES OUTPUT_NAME \"demo_native\")\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("demo.c"),
+            "int demo_add(int a, int b) { return a + b; }\n",
+        )
+        .unwrap();
+        let out = dir.path().join("out");
+        fs::create_dir_all(&out).unwrap();
+        let dylib = shared_lib_path(&out, "demo_native");
+        build_cmake_shared(dir.path(), "demo", "demo_native", &dylib).unwrap();
+        assert!(dylib.is_file(), "expected {}", dylib.display());
+    }
+
+    #[test]
+    fn meson_simple_shared_builds_when_toolchain_present() {
+        if !which_exists("meson") || !which_exists("ninja") || !which_exists("cc") {
+            eprintln!("skip: meson/ninja/cc missing");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("meson.build"),
+            "project('demo', 'c')\n\
+             shared_library('demo_native', 'demo.c')\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("demo.c"),
+            "int demo_add(int a, int b) { return a + b; }\n",
+        )
+        .unwrap();
+        let out = dir.path().join("out");
+        fs::create_dir_all(&out).unwrap();
+        let dylib = shared_lib_path(&out, "demo_native");
+        build_meson_shared(dir.path(), "demo", "demo_native", &dylib).unwrap();
+        assert!(dylib.is_file(), "expected {}", dylib.display());
+    }
+
+    #[test]
+    fn hare_missing_toolchain_is_honest() {
+        if which_exists("hare") {
+            eprintln!("skip: hare present");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("main.ha"),
+            "export fn add(a: int, b: int) int = a + b;\n",
+        )
+        .unwrap();
+        let out = dir.path().join("libx.so");
+        let err = build_hare_shared(dir.path(), "x", "x_native", &out).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("hare"), "{msg}");
+        assert!(msg.contains("not found") || msg.contains("PATH"), "{msg}");
     }
 }

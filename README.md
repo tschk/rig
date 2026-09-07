@@ -54,7 +54,7 @@ Resolves the package, pins it in `rig.toml` / `rig.lock`, and **auto-exposes** a
 - **V host ← cargo crate:** builds the same façade and writes `src/rig_bindings/<pkg>.v` (`#flag` + `fn C.…`).
 - **Odin host ← cargo crate:** builds the same façade and writes `src/rig_bindings/<pkg>.odin` (`foreign import` + `foreign` block).
 - **Hare host ← cargo crate:** builds the same façade and writes `src/rig_bindings/<pkg>.ha` (`@symbol` C ABI decls + `-L/-l` hints).
-- **C/C++/Zig host ← path/git c|cpp|zig:** compiles sources into `target/rig/<pkg>/lib*_native.{dylib,so}` when feasible (flat `.c/.cpp/.zig` or Makefile `$OUT`); clear error otherwise.
+- **C/C++/Zig/Nim/V/Odin/Hare host ← path/git c|cpp|zig|nim|v|odin|hare:** compiles into `target/rig/<pkg>/lib*_native.{dylib,so}` when feasible (flat sources, Makefile `$OUT`, **CMake**, **meson**, or language toolchain); honest error if the toolchain is missing.
 - **Rust host ← foreign lang:** generates an equilibrium-ffi `load` path stub.
 
 Ecosystem flags (mutually exclusive): `--cargo`/`--rust`, `--zig`, `--nim`, `--c`, `--cpp`, `--v`, `--d`, `--odin`, `--hare`, `--csharp`/`--cs`.
@@ -137,7 +137,7 @@ For every `rig add --rust <crate>` on a Zig (or other non-Rust) host, rig genera
 | `{crate}_version` | Null-terminated version string |
 | `{crate}_name` | Null-terminated crate name |
 
-Known enrichments (today: `rx4`, `sha2`) may export additional **methods** beyond the markers (e.g. `rx4_prompt_smoke`, `sha2_hash_256`).
+Known enrichments (today: `rx4`, `sha2`, `crc32fast`, `md-5`, `hex`) may export additional **methods** beyond the markers (e.g. `rx4_prompt_smoke`, `sha2_hash_256`, `hex_encode`).
 
 For other crates, rig **auto-wraps** a scanned public surface when sources are available (cargo registry / path / crates.io fetch):
 
@@ -187,3 +187,8 @@ Equilibrium-supported set: V, Zig, C, C++, C#, Rust, D, Nim, Odin, Hare.
 ## License
 
 ISC
+
+## CI
+
+GitHub Actions runs `fmt` / `clippy -D warnings` / `cargo test` on Ubuntu + macOS (+ Windows tests).
+An optional **path-c-smoke** job on Ubuntu exercises flat-C and CMake path/git fixtures via `scripts/ci-smoke-path-c.sh` (cmake/ninja only — no Nim/V/Odin/Hare required on CI).

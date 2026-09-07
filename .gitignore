@@ -21,3 +21,8 @@ examples/**/src/rig_bindings/
 examples/**/.rig/
 examples/**/main
 examples/c-host-sha2/main
+
+# path/git build scratch
+**/.rig-cmake-build/
+**/.rig-meson-build/
+**/.rig-nimcache/

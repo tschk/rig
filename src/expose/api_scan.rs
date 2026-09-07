@@ -90,8 +90,12 @@ impl FfiType {
 
     fn c_ty_base(&self) -> String {
         match self {
-            Self::ConstPtr(_) | Self::MutPtr(_) | Self::ConstCChar | Self::MutCChar
-            | Self::ConstVoid | Self::MutVoid => self.c_ty(),
+            Self::ConstPtr(_)
+            | Self::MutPtr(_)
+            | Self::ConstCChar
+            | Self::MutCChar
+            | Self::ConstVoid
+            | Self::MutVoid => self.c_ty(),
             other => other.c_ty(),
         }
     }
@@ -350,13 +354,23 @@ pub fn parse_ffi_type(raw: &str) -> Option<FfiType> {
         "f32" | "core::ffi::c_float" | "std::os::raw::c_float" => FfiType::F32,
         "f64" | "core::ffi::c_double" | "std::os::raw::c_double" => FfiType::F64,
         "bool" => FfiType::Bool,
-        "*constc_char" | "*constcore::ffi::c_char" | "*conststd::os::raw::c_char"
-        | "*constlibc::c_char" | "*consti8" => FfiType::ConstCChar,
-        "*mutc_char" | "*mutcore::ffi::c_char" | "*mutstd::os::raw::c_char"
-        | "*mutlibc::c_char" | "*muti8" => FfiType::MutCChar,
-        "*constc_void" | "*constcore::ffi::c_void" | "*conststd::os::raw::c_void"
+        "*constc_char"
+        | "*constcore::ffi::c_char"
+        | "*conststd::os::raw::c_char"
+        | "*constlibc::c_char"
+        | "*consti8" => FfiType::ConstCChar,
+        "*mutc_char"
+        | "*mutcore::ffi::c_char"
+        | "*mutstd::os::raw::c_char"
+        | "*mutlibc::c_char"
+        | "*muti8" => FfiType::MutCChar,
+        "*constc_void"
+        | "*constcore::ffi::c_void"
+        | "*conststd::os::raw::c_void"
         | "*constlibc::c_void" => FfiType::ConstVoid,
-        "*mutc_void" | "*mutcore::ffi::c_void" | "*mutstd::os::raw::c_void"
+        "*mutc_void"
+        | "*mutcore::ffi::c_void"
+        | "*mutstd::os::raw::c_void"
         | "*mutlibc::c_void" => FfiType::MutVoid,
         other if other.starts_with("*const") => {
             let inner = parse_ffi_type(&other["*const".len()..])?;
@@ -452,7 +466,9 @@ pub fn scan_crate_sources(crate_root: &Path, package_name: &str) -> ScanReport {
     let safe = crate_ident(package_name);
     let mut seen = BTreeSet::new();
     let root_api = collect_root_api_names(crate_root);
-    let walker = walkdir::WalkDir::new(&src).into_iter().filter_map(|e| e.ok());
+    let walker = walkdir::WalkDir::new(&src)
+        .into_iter()
+        .filter_map(|e| e.ok());
     for ent in walker {
         let path = ent.path();
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
@@ -590,10 +606,7 @@ fn scan_file_text(
                 });
                 let mut sig = trimmed.to_string();
                 let mut j = i;
-                while !sig.contains('{')
-                    && !sig.trim_end().ends_with(';')
-                    && j + 1 < lines.len()
-                {
+                while !sig.contains('{') && !sig.trim_end().ends_with(';') && j + 1 < lines.len() {
                     j += 1;
                     sig.push(' ');
                     sig.push_str(lines[j].trim());
@@ -617,10 +630,7 @@ fn scan_file_text(
                         impl_body_depths.push(brace_depth);
                         pending_impl = false;
                     }
-                    while impl_body_depths
-                        .last()
-                        .is_some_and(|d| brace_depth < *d)
-                    {
+                    while impl_body_depths.last().is_some_and(|d| brace_depth < *d) {
                         impl_body_depths.pop();
                     }
                     i += 1;
@@ -635,10 +645,7 @@ fn scan_file_text(
             impl_body_depths.push(brace_depth);
             pending_impl = false;
         }
-        while impl_body_depths
-            .last()
-            .is_some_and(|d| brace_depth < *d)
-        {
+        while impl_body_depths.last().is_some_and(|d| brace_depth < *d) {
             impl_body_depths.pop();
         }
 
@@ -658,7 +665,11 @@ fn classify_signature(
         report.skipped_async += 1;
         return None;
     }
-    if compact.contains('<') && compact.find("fn ").is_some_and(|p| compact[p..].contains('<')) {
+    if compact.contains('<')
+        && compact
+            .find("fn ")
+            .is_some_and(|p| compact[p..].contains('<'))
+    {
         // generic params on the function
         if let Some(fn_pos) = compact.find("fn ") {
             let after = &compact[fn_pos + 3..];
@@ -946,7 +957,11 @@ struct Foo;
         )
         .unwrap();
         let report = scan_crate_sources(root, "simple_api");
-        let names: Vec<_> = report.exports.iter().map(|e| e.export_name.as_str()).collect();
+        let names: Vec<_> = report
+            .exports
+            .iter()
+            .map(|e| e.export_name.as_str())
+            .collect();
         assert!(names.contains(&"simple_api_add"), "{names:?}");
         assert!(names.contains(&"simple_api_sqrt_f64"), "{names:?}");
         assert!(names.contains(&"simple_api_raw"), "{names:?}");
