@@ -331,6 +331,30 @@ fn expose_one(
                 }
             }
         }
+        (Language::CSharp, eco)
+            if matches!(eco, "c" | "cpp" | "zig" | "nim" | "v" | "odin" | "hare") =>
+        {
+            match path_native::build_path_git_lib(ctx, name, dep, resolved) {
+                Ok(built) => {
+                    csharp_host::write_csharp_path_native(&out_path, name, dep, &built)?;
+                }
+                Err(err) => {
+                    bail!("path/git expose build failed for `{name}` ({eco}): {err}");
+                }
+            }
+        }
+        (Language::D, eco)
+            if matches!(eco, "c" | "cpp" | "zig" | "nim" | "v" | "odin" | "hare") =>
+        {
+            match path_native::build_path_git_lib(ctx, name, dep, resolved) {
+                Ok(built) => {
+                    d_host::write_d_path_native(&out_path, name, dep, &built)?;
+                }
+                Err(err) => {
+                    bail!("path/git expose build failed for `{name}` ({eco}): {err}");
+                }
+            }
+        }
         (Language::Rust, eco) if eco != "cargo" => {
             rust_host::write_equilibrium_load_stub(&out_path, name, dep, eco)?;
             crate::util::edit::ensure_rust_mod_decl(&ctx.root)?;

@@ -57,7 +57,7 @@ pub fn run(args: &CheckArgs, g: &Globals) -> Result<u8> {
                 );
             }
             if args.full {
-                for lang in ["zig", "nim", "v", "odin", "hare"] {
+                for lang in ["zig", "nim", "v", "odin", "hare", "dmd", "dotnet"] {
                     let present = which(lang).is_some();
                     println!(
                         "{} {lang:8} {}",

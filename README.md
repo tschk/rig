@@ -54,7 +54,7 @@ Resolves the package, pins it in `rig.toml` / `rig.lock`, and **auto-exposes** a
 - **V host ← cargo crate:** builds the same façade and writes `src/rig_bindings/<pkg>.v` (`#flag` + `fn C.…`).
 - **Odin host ← cargo crate:** builds the same façade and writes `src/rig_bindings/<pkg>.odin` (`foreign import` + `foreign` block).
 - **Hare host ← cargo crate:** builds the same façade and writes `src/rig_bindings/<pkg>.ha` (`@symbol` C ABI decls + `-L/-l` hints).
-- **C/C++/Zig/Nim/V/Odin/Hare host ← path/git c|cpp|zig|nim|v|odin|hare:** compiles into `target/rig/<pkg>/lib*_native.{dylib,so}` when feasible (flat sources, Makefile `$OUT`, **CMake**, **meson**, or language toolchain); honest error if the toolchain is missing. Simple C prototypes from discovered headers (and Zig `export fn` when the dep is Zig) are emitted into Nim/V/Zig/Odin/Hare binders.
+- **C/C++/Zig/Nim/V/Odin/Hare/C#/D host ← path/git c|cpp|zig|nim|v|odin|hare:** compiles into `target/rig/<pkg>/lib*_native.{dylib,so}` when feasible (flat sources, Makefile `$OUT`, **CMake**, **meson**, or language toolchain); honest error if the toolchain is missing. Simple C prototypes from discovered headers (and Zig `export fn` when the dep is Zig) are emitted into Nim/V/Zig/Odin/Hare/C#/D binders.
 - **Rust host ← foreign lang:** generates an equilibrium-ffi `load` path stub.
 
 Ecosystem flags (mutually exclusive): `--cargo`/`--rust`, `--zig`, `--nim`, `--c`, `--cpp`, `--v`, `--d`, `--odin`, `--hare`, `--csharp`/`--cs`.
