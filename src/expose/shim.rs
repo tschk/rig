@@ -228,6 +228,15 @@ path = "src/lib.rs"
                 ScanReport::default(),
             )
         }
+        "md-5" | "md5" => {
+            let exports = md5_exports();
+            (
+                md5_lib_rs(version),
+                header_from_exports("md5", &lib_name, &exports, None),
+                exports,
+                ScanReport::default(),
+            )
+        }
         _ => build_generic_surface(name, version, path_hint.as_deref(), &cache, &lib_name, &dir)?,
     };
 
@@ -425,6 +434,32 @@ fn crc32fast_exports() -> Vec<ExportFn> {
             },
         ],
         ret: FfiType::U32,
+        kind: ExportKind::Enrichment,
+        is_unsafe: false,
+    });
+    v
+}
+
+fn md5_exports() -> Vec<ExportFn> {
+    let mut v = marker_exports("md5", "");
+    v.push(ExportFn {
+        export_name: "md5_hash".into(),
+        rust_callee: None,
+        params: vec![
+            Param {
+                name: "data".into(),
+                ty: FfiType::ConstPtr(Box::new(FfiType::U8)),
+            },
+            Param {
+                name: "len".into(),
+                ty: FfiType::Usize,
+            },
+            Param {
+                name: "out".into(),
+                ty: FfiType::MutPtr(Box::new(FfiType::U8)),
+            },
+        ],
+        ret: FfiType::I32,
         kind: ExportKind::Enrichment,
         is_unsafe: false,
     });
@@ -852,6 +887,55 @@ pub extern "C" fn crc32fast_hash(data: *const u8, len: usize) -> u32 {{
     )
 }
 
+
+fn md5_lib_rs(version: &str) -> String {
+    format!(
+        r#"//! rig-generated C ABI façade for `md-5` (markers + MD5 helper).
+//! Known enrichment — MD5 is not for new security-sensitive designs.
+
+use md5::{{Digest, Md5}};
+use std::os::raw::c_char;
+use std::slice;
+
+#[no_mangle]
+pub extern "C" fn md5_abi_version() -> u32 {{
+    2
+}}
+
+#[no_mangle]
+pub extern "C" fn md5_version() -> *const c_char {{
+    concat!("{version}", "\0").as_ptr() as *const c_char
+}}
+
+#[no_mangle]
+pub extern "C" fn md5_name() -> *const c_char {{
+    b"md-5\0".as_ptr() as *const c_char
+}}
+
+/// MD5: write 16 bytes to `out`. 0 ok; -1 null data; -2 null out.
+#[no_mangle]
+pub extern "C" fn md5_hash(data: *const u8, len: usize, out: *mut u8) -> i32 {{
+    if out.is_null() {{
+        return -2;
+    }}
+    if len > 0 && data.is_null() {{
+        return -1;
+    }}
+    let input = if len == 0 {{
+        &[][..]
+    }} else {{
+        unsafe {{ slice::from_raw_parts(data, len) }}
+    }};
+    let digest = Md5::digest(input);
+    unsafe {{
+        slice::from_raw_parts_mut(out, 16).copy_from_slice(&digest);
+    }}
+    0
+}}
+"#
+    )
+}
+
 /// Generate generic façade `lib.rs` for an arbitrary cargo package (markers only).
 pub fn generic_lib_rs(name: &str, version: &str) -> String {
     generic_lib_rs_with_wraps(name, version, &marker_exports(name, version), "markers only")
@@ -1020,6 +1104,16 @@ mod tests {
         assert!(lib.contains("crc32fast::hash"));
         let exports = crc32fast_exports();
         assert!(exports.iter().any(|e| e.export_name == "crc32fast_hash"));
+    }
+
+    #[test]
+    fn md5_enrichment_exports_hash() {
+        let lib = md5_lib_rs("0.10.6");
+        assert!(lib.contains("fn md5_abi_version"));
+        assert!(lib.contains("fn md5_hash"));
+        assert!(lib.contains("Md5::digest"));
+        let exports = md5_exports();
+        assert!(exports.iter().any(|e| e.export_name == "md5_hash"));
     }
 
     #[test]

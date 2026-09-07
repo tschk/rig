@@ -313,9 +313,12 @@ fn build_zig_shared(
         .find(|p| p.parent() == Some(source_root))
         .unwrap_or(&sources[0]);
 
+    let emit = format!("-femit-bin={}", out.display());
     let status = Command::new("zig")
-        .args(["build-lib", "-dynamic", "-OReleaseFast", "-femit-bin"])
-        .arg(out)
+        .args(["build-lib", "-dynamic", "-OReleaseFast"])
+        .arg(&emit)
+        .arg("--name")
+        .arg(lib_name)
         .arg(root_src)
         .current_dir(source_root)
         .status()
@@ -327,7 +330,6 @@ fn build_zig_shared(
             root_src.display()
         );
     }
-    let _ = lib_name; // name encoded in `out`
     Ok(())
 }
 

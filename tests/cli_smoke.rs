@@ -207,3 +207,60 @@ fn add_path_c_empty_dir_errors_clearly() {
         .failure()
         .stderr(predicate::str::contains("path/git expose build failed").or(predicate::str::contains("no compilable")));
 }
+
+#[test]
+fn add_path_zig_on_zig_host_builds_native() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("build.zig"),
+        r#"const std = @import("std");
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const exe = b.addExecutable(.{ .name = "demo", .root_source_file = b.path("src/main.zig"), .target = target, .optimize = optimize });
+    b.installArtifact(exe);
+}
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/main.zig"), "pub fn main() void {}\n").unwrap();
+
+    let vendor = dir.path().join("vendor/zmath");
+    std::fs::create_dir_all(&vendor).unwrap();
+    std::fs::write(
+        vendor.join("root.zig"),
+        "export fn zmath_add(a: i32, b: i32) i32 { return a + b; }\n",
+    )
+    .unwrap();
+
+    rig()
+        .current_dir(dir.path())
+        .args(["init"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("host: zig"));
+
+    let path_spec = format!("path:{}", vendor.display());
+    rig()
+        .current_dir(dir.path())
+        .args(["add", "--zig", &path_spec])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("added"));
+
+    let bindings = dir.path().join("src/rig_bindings/zmath_bindings.zig");
+    assert!(bindings.is_file(), "expected zig bindings");
+    let text = std::fs::read_to_string(&bindings).unwrap();
+    assert!(text.contains("native_lib"), "{text}");
+    assert!(text.contains("zmath_native"), "{text}");
+
+    let native = dir.path().join("target/rig/zmath");
+    assert!(native.is_dir(), "expected native out dir");
+    let has_lib = std::fs::read_dir(&native).unwrap().any(|e| {
+        let n = e.unwrap().file_name().to_string_lossy().into_owned();
+        n.contains("zmath_native")
+            && (n.ends_with(".dylib") || n.ends_with(".so") || n.ends_with(".dll"))
+    });
+    assert!(has_lib, "expected built zmath_native shared lib");
+}
