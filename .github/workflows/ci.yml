@@ -39,6 +39,8 @@ jobs:
         run: cargo build --release
       - name: smoke path C + cmake fixtures
         run: bash scripts/ci-smoke-path-c.sh
+      - name: smoke path zig when available (else skip)
+        run: bash scripts/ci-smoke-path-extra.sh
 
   windows:
     runs-on: windows-latest

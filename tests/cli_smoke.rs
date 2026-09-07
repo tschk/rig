@@ -377,3 +377,195 @@ fn add_path_hare_missing_toolchain_is_honest() {
                 .and(predicate::str::contains("not found").or(predicate::str::contains("PATH"))),
         );
 }
+
+fn toolchain_ok(bin: &str) -> bool {
+    std::process::Command::new(bin)
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn write_tiny_cargo_api(dir: &std::path::Path) {
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        r#"[package]
+name = "tiny_api"
+version = "0.1.0"
+edition = "2021"
+[lib]
+crate-type = ["rlib"]
+path = "src/lib.rs"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/lib.rs"),
+        r#"
+pub fn add(a: i32, b: i32) -> i32 { a + b }
+pub fn take_opt(p: Option<*mut u8>) -> Option<*mut u8> { p }
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn nim_host_cargo_facade_compiles_when_nim_present() {
+    if !toolchain_ok("nim") {
+        eprintln!("skip: nim not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    // Nim host markers
+    std::fs::write(
+        dir.path().join("demo.nimble"),
+        "version = \"0.1.0\"\nauthor = \"rig\"\ndescription = \"demo\"\nlicense = \"ISC\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/main.nim"), "echo \"hi\"\n").unwrap();
+
+    let vendor = dir.path().join("vendor/tiny_api");
+    write_tiny_cargo_api(&vendor);
+
+    rig()
+        .current_dir(dir.path())
+        .args(["init"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("host: nim"));
+
+    let path_spec = format!("path:{}", vendor.display());
+    rig()
+        .current_dir(dir.path())
+        .args(["add", "--rust", &path_spec, "-y"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("added"));
+
+    let binding = dir.path().join("src/rig_bindings/tiny_api.nim");
+    assert!(binding.is_file(), "expected nim binding");
+    let text = std::fs::read_to_string(&binding).unwrap();
+    assert!(
+        text.contains("tiny_api_abi_version") || text.contains("tiny_api_add"),
+        "{text}"
+    );
+    assert!(text.contains("{.passL:"), "{text}");
+
+    let native = dir.path().join("target/rig/tiny_api");
+    let has_lib = std::fs::read_dir(&native).unwrap().any(|e| {
+        let n = e.unwrap().file_name().to_string_lossy().into_owned();
+        n.contains("tiny_api_ffi")
+            && (n.ends_with(".dylib") || n.ends_with(".so") || n.ends_with(".dll"))
+    });
+    assert!(has_lib, "expected tiny_api_ffi cdylib");
+
+    // End-to-end: compile a tiny Nim program that links the façade and calls abi_version.
+    let smoke = dir.path().join("smoke_call.nim");
+    std::fs::write(&smoke, "import tiny_api\necho tiny_api_abi_version()\n").unwrap();
+    let out = std::process::Command::new("nim")
+        .args([
+            "c",
+            "--hints:off",
+            "--warnings:off",
+            "--path:src/rig_bindings",
+            "-r",
+            "smoke_call.nim",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("run nim");
+    assert!(
+        out.status.success(),
+        "nim compile failed:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn v_host_cargo_facade_compiles_when_v_present() {
+    if !toolchain_ok("v") {
+        eprintln!("skip: v not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("v.mod"),
+        "Module {\n\tname: 'demo'\n\tversion: '0.0.1'\n}\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/main.v"), "fn main() {}\n").unwrap();
+
+    let vendor = dir.path().join("vendor/tiny_api");
+    write_tiny_cargo_api(&vendor);
+
+    rig()
+        .current_dir(dir.path())
+        .args(["init"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("host: v"));
+
+    let path_spec = format!("path:{}", vendor.display());
+    rig()
+        .current_dir(dir.path())
+        .args(["add", "--rust", &path_spec, "-y"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("added"));
+
+    let binding = dir.path().join("src/rig_bindings/tiny_api.v");
+    assert!(binding.is_file(), "expected v binding");
+    let text = std::fs::read_to_string(&binding).unwrap();
+    assert!(
+        text.contains("fn C.tiny_api_abi_version") || text.contains("tiny_api_add"),
+        "{text}"
+    );
+    assert!(text.contains("#flag -l"), "{text}");
+
+    let native = dir.path().join("target/rig/tiny_api");
+    let has_lib = std::fs::read_dir(&native).unwrap().any(|e| {
+        let n = e.unwrap().file_name().to_string_lossy().into_owned();
+        n.contains("tiny_api_ffi")
+            && (n.ends_with(".dylib") || n.ends_with(".so") || n.ends_with(".dll"))
+    });
+    assert!(has_lib, "expected tiny_api_ffi cdylib");
+
+    // Single-file V smoke: #include header + fn C.… decls (both required on V 0.5).
+    let abs_native = dir.path().join("target/rig/tiny_api");
+    let smoke = dir.path().join("smoke_call.v");
+    let hdr = dir.path().join("src/rig_bindings/tiny_api_ffi.h");
+    let hdr2 = abs_native.join("tiny_api_ffi.h");
+    assert!(
+        hdr.is_file() || hdr2.is_file(),
+        "expected tiny_api_ffi.h beside bindings or native out"
+    );
+    let include_dir = if hdr.is_file() {
+        dir.path().join("src/rig_bindings")
+    } else {
+        abs_native.clone()
+    };
+    std::fs::write(
+        &smoke,
+        format!(
+            "#flag -L{nat}\n#flag -ltiny_api_ffi\n#flag -Wl,-rpath,{nat}\n#flag -I{inc}\n#include \"tiny_api_ffi.h\"\n\nfn C.tiny_api_abi_version() u32\n\nfn main() {{\n\tprintln(C.tiny_api_abi_version())\n}}\n",
+            nat = abs_native.display(),
+            inc = include_dir.display()
+        ),
+    )
+    .unwrap();
+    let out = std::process::Command::new("v")
+        .args(["-keepc", "-gc", "none", "run", "smoke_call.v"])
+        .current_dir(dir.path())
+        .output()
+        .expect("run v");
+    assert!(
+        out.status.success(),
+        "v compile failed:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

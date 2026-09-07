@@ -147,7 +147,8 @@ For other crates, rig **auto-wraps** a scanned public surface when sources are a
 
 ### Honest limits
 
-- **Skipped:** generics, `async`, `impl` methods/traits, tuples/arrays/refs, `str`/`String`/`Vec`, `f16`/`f128`, and other non-FFI-safe types.
+- **Skipped:** generics, `async`, `impl` methods/traits, tuples/arrays/refs, `str`/`String`/`Vec`, `f16`/`f128`, `Option<scalar>` (non-niche), and other non-FFI-safe types.
+- **Wrapped niches (safe):** `Option<*T>` / `Option<NonNull<T>>` / `NonNull<T>` / `NonZero*` / `*const ()` / `*mut ()`, plus more `core::ffi::c_*` aliases; `extern "C-unwind"` treated like `extern "C"`.
 - **cbindgen** runs only when the crate ships `cbindgen.toml` **and** the `cbindgen` binary is on `PATH` (provenance header only; scan remains canonical).
 - Crates with `#![forbid(unsafe_code)]` still work: unsafe lives only in the generated façade.
 - Auto-wrap caps at 256 symbols per crate; enrichments remain intentional for trait-heavy APIs (e.g. `sha2_hash_256`).
@@ -191,4 +192,5 @@ ISC
 ## CI
 
 GitHub Actions runs `fmt` / `clippy -D warnings` / `cargo test` on Ubuntu + macOS (+ Windows tests).
-An optional **path-c-smoke** job on Ubuntu exercises flat-C and CMake path/git fixtures via `scripts/ci-smoke-path-c.sh` (cmake/ninja only — no Nim/V/Odin/Hare required on CI).
+An optional **path-c-smoke** job on Ubuntu exercises flat-C and CMake path/git fixtures via `scripts/ci-smoke-path-c.sh` (cmake/ninja).
+`scripts/ci-smoke-path-extra.sh` additionally tries a Zig path fixture when `zig` is on `PATH` (skipped otherwise). Nim/V/Odin/Hare e2e compile smokes run locally when those toolchains are present (`cargo test` skips them quietly on stock CI).
