@@ -71,6 +71,27 @@ pub fn write_csharp_bindings(
              }\n",
         );
     }
+    if exports.iter().any(|e| e.export_name == "sha2_hash_512") {
+        body.push_str(
+            "\n\
+             public static byte[] Hash512(byte[] data)\n\
+             {\n\
+                 var output = new byte[64];\n\
+                 var rc = sha2_hash_512(data, (UIntPtr)data.Length, output);\n\
+                 if (rc != 0) throw new InvalidOperationException($\"sha2_hash_512 failed: {rc}\");\n\
+                 return output;\n\
+             }\n",
+        );
+    }
+
+    if exports.iter().any(|e| e.export_name == "crc32fast_hash") {
+        body.push_str(
+            "\n\
+             public static uint Crc32(byte[] data) =>\n\
+                 crc32fast_hash(data, (UIntPtr)data.Length);\n",
+        );
+    }
+
 
     body.push_str("}\n");
     std::fs::write(out, body).with_context(|| format!("write {}", out.display()))?;

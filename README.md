@@ -113,7 +113,7 @@ rig build
 
 - [`examples/zig-host-rx4`](examples/zig-host-rx4) — Zig ← `rx4` via thin `rx4_ffi` façade + equilibrium-ffi.
 - [`examples/zig-host-multi`](examples/zig-host-multi) — Zig ← **multiple** cargo crates (`rx4` + `sha2`) via the **generic** façade.
-- [`examples/c-host-sha2`](examples/c-host-sha2) — C ← `sha2` markers via the same façade (`cc` + `-lsha2_ffi`).
+- [`examples/c-host-sha2`](examples/c-host-sha2) — C ← `sha2` markers + `sha2_hash_256`/`sha2_hash_512` (`cc` + `-lsha2_ffi`).
 - [`examples/c-host-libm`](examples/c-host-libm) — C ← **auto-wrapped** `libm` (`libm_sqrt`, …) beyond markers.
 
 ```bash
