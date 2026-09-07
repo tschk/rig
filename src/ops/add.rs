@@ -127,7 +127,7 @@ pub fn run(args: &AddArgs, g: &Globals) -> Result<u8> {
             "added {} {} ({})",
             resolved.name, resolved.version, resolved.ecosystem
         );
-        println!("  expose {}", out);
+        println!("  expose {out}");
     }
 
     if !g.dry_run {
