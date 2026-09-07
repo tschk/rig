@@ -213,6 +213,10 @@ fn add_path_c_empty_dir_errors_clearly() {
 
 #[test]
 fn add_path_zig_on_zig_host_builds_native() {
+    if !toolchain_ok("zig") {
+        eprintln!("skip: zig not on PATH");
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("build.zig"),
