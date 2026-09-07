@@ -1,16 +1,19 @@
 //! C# host ← cargo package via generic C ABI façade (P/Invoke).
 
+use crate::expose::api_scan::ExportFn;
+use crate::expose::surface;
 use crate::manifest::Dependency;
 use anyhow::{Context, Result};
 use std::path::Path;
 
-/// Emit a C# partial class with DllImport for façade markers (+ known enrichments).
+/// Emit a C# partial class with DllImport for façade markers (+ scanned exports).
 pub fn write_csharp_bindings(
     out: &Path,
     name: &str,
     dep: &Dependency,
     lib_name: &str,
     native_dir: &str,
+    exports: &[ExportFn],
 ) -> Result<()> {
     let ver = dep.version.as_deref().unwrap_or("*");
     let safe = name.replace('-', "_");
@@ -28,8 +31,12 @@ pub fn write_csharp_bindings(
              public const string PackageName = \"{name}\";\n\
              public const string PackageVersion = \"{ver}\";\n\
              public const string NativeLib = \"{lib_name}\";\n\
-             public const string NativeDir = \"{native_dir}\";\n\
-         \n\
+             public const string NativeDir = \"{native_dir}\";\n"
+    ));
+
+    if exports.is_empty() {
+        body.push_str(&format!(
+            "\n\
              [DllImport(\"{lib_name}\", CallingConvention = CallingConvention.Cdecl)]\n\
              public static extern uint {safe}_abi_version();\n\
          \n\
@@ -37,8 +44,14 @@ pub fn write_csharp_bindings(
              public static extern IntPtr {safe}_version();\n\
          \n\
              [DllImport(\"{lib_name}\", CallingConvention = CallingConvention.Cdecl)]\n\
-             public static extern IntPtr {safe}_name();\n\
-         \n\
+             public static extern IntPtr {safe}_name();\n"
+        ));
+    } else {
+        body.push_str(&surface::emit_csharp_dllimports(exports, lib_name));
+    }
+
+    body.push_str(&format!(
+        "\n\
              public static string VersionString() =>\n\
                  Marshal.PtrToStringUTF8({safe}_version()) ?? string.Empty;\n\
          \n\
@@ -46,12 +59,9 @@ pub fn write_csharp_bindings(
                  Marshal.PtrToStringUTF8({safe}_name()) ?? string.Empty;\n"
     ));
 
-    if name == "sha2" {
+    if exports.iter().any(|e| e.export_name == "sha2_hash_256") {
         body.push_str(
             "\n\
-             [DllImport(\"sha2_ffi\", CallingConvention = CallingConvention.Cdecl)]\n\
-             public static extern int sha2_hash_256(byte[] data, UIntPtr len, byte[] output);\n\
-         \n\
              public static byte[] Hash256(byte[] data)\n\
              {\n\
                  var output = new byte[32];\n\
@@ -59,19 +69,6 @@ pub fn write_csharp_bindings(
                  if (rc != 0) throw new InvalidOperationException($\"sha2_hash_256 failed: {rc}\");\n\
                  return output;\n\
              }\n",
-        );
-    }
-    if matches!(name, "rx4" | "rotary") {
-        body.push_str(
-            "\n\
-             [DllImport(\"rx4_ffi\", CallingConvention = CallingConvention.Cdecl)]\n\
-             public static extern IntPtr rx4_agent_new();\n\
-         \n\
-             [DllImport(\"rx4_ffi\", CallingConvention = CallingConvention.Cdecl)]\n\
-             public static extern void rx4_agent_free(IntPtr agent);\n\
-         \n\
-             [DllImport(\"rx4_ffi\", CallingConvention = CallingConvention.Cdecl)]\n\
-             public static extern int rx4_prompt_smoke(IntPtr agent, string prompt);\n",
         );
     }
 
@@ -96,6 +93,7 @@ fn to_pascal(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::expose::api_scan::{ExportFn, ExportKind, FfiType, Param};
     use crate::manifest::Dependency;
 
     fn dep(version: &str) -> Dependency {
@@ -117,7 +115,55 @@ mod tests {
     fn csharp_bindings_emit_dllimport() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("Sha2.cs");
-        write_csharp_bindings(&out, "sha2", &dep("0.10.9"), "sha2_ffi", "target/rig/sha2").unwrap();
+        let exports = vec![
+            ExportFn {
+                export_name: "sha2_abi_version".into(),
+                rust_callee: None,
+                params: vec![],
+                ret: FfiType::U32,
+                kind: ExportKind::Marker,
+                is_unsafe: false,
+            },
+            ExportFn {
+                export_name: "sha2_version".into(),
+                rust_callee: None,
+                params: vec![],
+                ret: FfiType::ConstCChar,
+                kind: ExportKind::Marker,
+                is_unsafe: false,
+            },
+            ExportFn {
+                export_name: "sha2_name".into(),
+                rust_callee: None,
+                params: vec![],
+                ret: FfiType::ConstCChar,
+                kind: ExportKind::Marker,
+                is_unsafe: false,
+            },
+            ExportFn {
+                export_name: "sha2_hash_256".into(),
+                rust_callee: None,
+                params: vec![
+                    Param {
+                        name: "data".into(),
+                        ty: FfiType::ConstPtr(Box::new(FfiType::U8)),
+                    },
+                    Param {
+                        name: "len".into(),
+                        ty: FfiType::Usize,
+                    },
+                    Param {
+                        name: "output".into(),
+                        ty: FfiType::MutPtr(Box::new(FfiType::U8)),
+                    },
+                ],
+                ret: FfiType::I32,
+                kind: ExportKind::Enrichment,
+                is_unsafe: false,
+            },
+        ];
+        write_csharp_bindings(&out, "sha2", &dep("0.10.9"), "sha2_ffi", "target/rig/sha2", &exports)
+            .unwrap();
         let text = std::fs::read_to_string(&out).unwrap();
         assert!(text.contains("DllImport(\"sha2_ffi\""));
         assert!(text.contains("sha2_abi_version"));

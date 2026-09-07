@@ -1,5 +1,7 @@
 //! D host ← cargo package via generic C ABI façade.
 
+use crate::expose::api_scan::ExportFn;
+use crate::expose::surface;
 use crate::manifest::Dependency;
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -11,6 +13,7 @@ pub fn write_d_bindings(
     dep: &Dependency,
     lib_name: &str,
     native_dir: &str,
+    exports: &[ExportFn],
 ) -> Result<()> {
     let ver = dep.version.as_deref().unwrap_or("*");
     let safe = name.replace('-', "_");
@@ -24,20 +27,16 @@ pub fn write_d_bindings(
          pragma(lib, \"{lib_name}\");\n\
          // Add -L{native_dir} on the dmd/ldc command line (or DUB lflags).\n\
          \n\
-         extern(C) {{\n\
-             uint {safe}_abi_version();\n\
+         extern(C) {{\n"
+    ));
+    if exports.is_empty() {
+        body.push_str(&format!(
+            "    uint {safe}_abi_version();\n\
              const(char)* {safe}_version();\n\
              const(char)* {safe}_name();\n"
-    ));
-    if name == "sha2" {
-        body.push_str("    int sha2_hash_256(const(ubyte)* data, size_t len, ubyte* out_);\n");
-    }
-    if matches!(name, "rx4" | "rotary") {
-        body.push_str(
-            "    void* rx4_agent_new();\n\
-             void rx4_agent_free(void* agent);\n\
-             int rx4_prompt_smoke(void* agent, const(char)* prompt);\n",
-        );
+        ));
+    } else {
+        body.push_str(&surface::emit_d_externs(exports));
     }
     body.push_str(&format!(
         "}}\n\
@@ -54,6 +53,7 @@ pub fn write_d_bindings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::expose::api_scan::{ExportFn, ExportKind, FfiType};
     use crate::manifest::Dependency;
 
     #[test]
@@ -72,7 +72,25 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("sha2.d");
-        write_d_bindings(&out, "sha2", &dep, "sha2_ffi", "target/rig/sha2").unwrap();
+        let exports = vec![
+            ExportFn {
+                export_name: "sha2_abi_version".into(),
+                rust_callee: None,
+                params: vec![],
+                ret: FfiType::U32,
+                kind: ExportKind::Marker,
+                is_unsafe: false,
+            },
+            ExportFn {
+                export_name: "sha2_hash_256".into(),
+                rust_callee: None,
+                params: vec![],
+                ret: FfiType::I32,
+                kind: ExportKind::Enrichment,
+                is_unsafe: false,
+            },
+        ];
+        write_d_bindings(&out, "sha2", &dep, "sha2_ffi", "target/rig/sha2", &exports).unwrap();
         let text = std::fs::read_to_string(&out).unwrap();
         assert!(text.contains("extern(C)"));
         assert!(text.contains("sha2_abi_version"));

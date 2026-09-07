@@ -110,6 +110,7 @@ rig build
 - [`examples/zig-host-rx4`](examples/zig-host-rx4) — Zig ← `rx4` via thin `rx4_ffi` façade + equilibrium-ffi.
 - [`examples/zig-host-multi`](examples/zig-host-multi) — Zig ← **multiple** cargo crates (`rx4` + `sha2`) via the **generic** façade.
 - [`examples/c-host-sha2`](examples/c-host-sha2) — C ← `sha2` markers via the same façade (`cc` + `-lsha2_ffi`).
+- [`examples/c-host-libm`](examples/c-host-libm) — C ← **auto-wrapped** `libm` (`libm_sqrt`, …) beyond markers.
 
 ```bash
 cd examples/zig-host-rx4
@@ -134,12 +135,18 @@ For every `rig add --rust <crate>` on a Zig (or other non-Rust) host, rig genera
 
 Known enrichments (today: `rx4`, `sha2`) may export additional **methods** beyond the markers (e.g. `rx4_prompt_smoke`, `sha2_hash_256`).
 
+For other crates, rig **auto-wraps** a scanned public surface when sources are available (cargo registry / path / crates.io fetch):
+
+- Existing `#[no_mangle] extern "C"` functions are re-exported under the same name.
+- Plain `pub fn` / `pub const fn` with only FFI-safe scalar/pointer types become `{crate}_{fn}` exports (façade ABI 2).
+- Host binders (Zig/Nim/C/C#/D) emit the discovered declarations; see `.rig/shims/<crate>/surface.json`.
+
 ### Honest limits
 
-- **Not** an automatic wrap of arbitrary Rust APIs (generics, traits, async, non-`repr(C)` types).
-- **cbindgen** of a full public surface is not run automatically; crates need FFI-safe annotations for that to be useful.
+- **Skipped:** generics, `async`, `impl` methods/traits, tuples/arrays/refs, `str`/`String`/`Vec`, `f16`/`f128`, and other non-FFI-safe types.
+- **cbindgen** runs only when the crate ships `cbindgen.toml` **and** the `cbindgen` binary is on `PATH` (provenance header only; scan remains canonical).
 - Crates with `#![forbid(unsafe_code)]` still work: unsafe lives only in the generated façade.
-- Marker symbols embed the version rig pinned; known enrichments (e.g. `sha2_hash_256`) add selected domain methods intentionally.
+- Auto-wrap caps at 256 symbols per crate; enrichments remain intentional for trait-heavy APIs (e.g. `sha2_hash_256`).
 - Rust hosts keep the native Cargo re-export path (`src/rig_bindings/<pkg>.rs`); the cdylib façade is for cross-language hosts.
 
 ## Manifest

@@ -16,10 +16,18 @@
 //!    on the package and exports the markers above.
 //! 3. Known enrichments (e.g. `rx4`) may export additional symbols.
 //!
-//! Honest limits: arbitrary Rust APIs (generics, traits, async, non-`repr(C)`
-//! types) are **not** auto-wrapped. Full cbindgen of a public API is not
-//! automatic without FFI-safe annotations.
+//! Auto-wrap: when sources are available, rig scans for simple `pub fn` /
+//! existing `extern "C"` surfaces and exports them from the façade (see
+//! `api_scan`). Honest limits remain: generics, traits/`impl` methods, async,
+//! tuples/refs/`str`/`String`/`Vec`, and non-FFI-safe types are skipped.
+//! Optional `cbindgen` runs only when the crate ships `cbindgen.toml` and the
+//! `cbindgen` binary is on `PATH`.
 
+use crate::expose::api_scan::{
+    ExportFn, ExportKind, FfiType, Param, ScanReport, locate_or_fetch_sources, scan_crate_sources,
+    try_cbindgen,
+};
+use crate::expose::surface;
 use crate::manifest::Dependency;
 use crate::resolve::ResolvedPackage;
 use crate::util::AppCtx;
@@ -33,6 +41,10 @@ pub struct ShimArtifacts {
     pub out_dir: PathBuf,
     /// When true, `shim_dir` is the upstream crate itself (already a cdylib).
     pub passthrough: bool,
+    /// Full callable surface (markers + enrichments + auto-wraps).
+    pub exports: Vec<ExportFn>,
+    /// Scanner summary (skipped counts); empty for enrichments/passthrough.
+    pub scan: ScanReport,
 }
 
 pub fn shim_dir(ctx: &AppCtx, name: &str) -> PathBuf {
@@ -132,8 +144,7 @@ pub fn ensure_shim(
         let manifest = path.join("Cargo.toml");
         if crate_has_cdylib(&manifest) {
             let lib_name = lib_name_from_cargo(&manifest, name);
-            let header_path = write_passthrough_header(&out_dir, name, &lib_name)?;
-            // Also keep a copy under .rig/shims for discoverability.
+            let (header_path, exports) = write_passthrough_header(&out_dir, name, &lib_name)?;
             let dir = shim_dir(ctx, name);
             std::fs::create_dir_all(&dir)?;
             let _ = std::fs::copy(&header_path, dir.join(header_path.file_name().unwrap()));
@@ -147,6 +158,8 @@ pub fn ensure_shim(
                 lib_name,
                 out_dir,
                 passthrough: true,
+                exports,
+                scan: ScanReport::default(),
             });
         }
     }
@@ -181,20 +194,45 @@ path = "src/lib.rs"
     );
     std::fs::write(dir.join("Cargo.toml"), cargo_toml)?;
 
-    let lib_rs = match name {
-        "rx4" | "rotary" => rx4_lib_rs(),
-        "sha2" => sha2_lib_rs(version),
-        _ => generic_lib_rs(name, version),
-    };
-    std::fs::write(dir.join("src/lib.rs"), lib_rs)?;
+    let path_hint = resolve_dep_path(name, resolved, dep);
+    let cache = ctx
+        .root
+        .join(&ctx.manifest.expose.cache)
+        .join("crates");
 
-    let header = match name {
-        "rx4" | "rotary" => rx4_header(),
-        "sha2" => sha2_header(),
-        _ => generic_header(name, &lib_name),
+    let (lib_rs, header, exports, scan) = match name {
+        "rx4" | "rotary" => {
+            let exports = rx4_exports();
+            (
+                rx4_lib_rs(),
+                header_from_exports(name, &lib_name, &exports, None),
+                exports,
+                ScanReport::default(),
+            )
+        }
+        "sha2" => {
+            let exports = sha2_exports();
+            (
+                sha2_lib_rs(version),
+                header_from_exports(name, &lib_name, &exports, None),
+                exports,
+                ScanReport::default(),
+            )
+        }
+        _ => build_generic_surface(name, version, path_hint.as_deref(), &cache, &lib_name, &dir)?,
     };
+
+    std::fs::write(dir.join("src/lib.rs"), &lib_rs)?;
     let header_path = dir.join(format!("{lib_name}.h"));
-    std::fs::write(&header_path, header)?;
+    std::fs::write(&header_path, &header)?;
+    let _ = write_surface_json(
+        &dir.join("surface.json"),
+        name,
+        version,
+        &lib_name,
+        &exports,
+        &scan,
+    );
 
     Ok(ShimArtifacts {
         shim_dir: dir,
@@ -202,16 +240,239 @@ path = "src/lib.rs"
         lib_name,
         out_dir,
         passthrough: false,
+        exports,
+        scan,
     })
 }
 
-fn write_passthrough_header(out_dir: &Path, name: &str, lib_name: &str) -> Result<PathBuf> {
-    // Markers still emitted so hosts have a stable discovery surface even when
-    // linking an upstream cdylib that may export a different API.
-    let header = generic_header(name, lib_name);
-    // Note: passthrough does not inject these symbols into the upstream dylib;
-    // the header documents the *façade* convention. Hosts should prefer the
-    // upstream's own headers when present. We still write a discovery header.
+fn build_generic_surface(
+    name: &str,
+    version: &str,
+    path_hint: Option<&Path>,
+    cache: &Path,
+    lib_name: &str,
+    dir: &Path,
+) -> Result<(String, String, Vec<ExportFn>, ScanReport)> {
+    let mut scan = ScanReport::default();
+    let mut wraps: Vec<ExportFn> = Vec::new();
+    if let Some(src) = locate_or_fetch_sources(name, version, path_hint, cache) {
+        scan = scan_crate_sources(&src, name);
+        const MAX_AUTO: usize = 256;
+        wraps = scan
+            .exports
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.kind,
+                    ExportKind::AutoWrap | ExportKind::UpstreamExternC
+                )
+            })
+            .take(MAX_AUTO)
+            .cloned()
+            .collect();
+        let cbind_out = dir.join("cbindgen_prov.h");
+        if try_cbindgen(&src, &cbind_out) {
+            let _ = std::fs::write(
+                dir.join("CBINDGEN"),
+                format!(
+                    "cbindgen.toml detected; provenance at {}\n",
+                    cbind_out.display()
+                ),
+            );
+        }
+    }
+    let mut exports = marker_exports(name, version);
+    exports.extend(wraps);
+    let note = scan_note(&scan);
+    let lib_rs = generic_lib_rs_with_wraps(name, version, &exports, &note);
+    let header = header_from_exports(name, lib_name, &exports, Some(&note));
+    Ok((lib_rs, header, exports, scan))
+}
+
+fn scan_note(scan: &ScanReport) -> String {
+    let callable = scan
+        .exports
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.kind,
+                ExportKind::AutoWrap | ExportKind::UpstreamExternC
+            )
+        })
+        .count();
+    format!(
+        "auto-wrap: {callable} callable; skipped generics={} async={} unfriendly={} impl_methods={}",
+        scan.skipped_generics,
+        scan.skipped_async,
+        scan.skipped_unfriendly,
+        scan.skipped_impl_methods
+    )
+}
+
+fn write_surface_json(
+    path: &Path,
+    name: &str,
+    version: &str,
+    lib_name: &str,
+    exports: &[ExportFn],
+    scan: &ScanReport,
+) -> Result<()> {
+    let names: Vec<&str> = exports.iter().map(|e| e.export_name.as_str()).collect();
+    let body = serde_json::json!({
+        "package": name,
+        "version": version,
+        "lib_name": lib_name,
+        "exports": names,
+        "skipped": {
+            "generics": scan.skipped_generics,
+            "async": scan.skipped_async,
+            "unfriendly": scan.skipped_unfriendly,
+            "impl_methods": scan.skipped_impl_methods,
+        },
+        "source_root": scan.source_root.as_ref().map(|p| p.display().to_string()),
+    });
+    std::fs::write(path, serde_json::to_string_pretty(&body)?)?;
+    Ok(())
+}
+
+fn marker_exports(name: &str, _version: &str) -> Vec<ExportFn> {
+    let safe = crate_ident(name);
+    vec![
+        ExportFn {
+            export_name: format!("{safe}_abi_version"),
+            rust_callee: None,
+            params: vec![],
+            ret: FfiType::U32,
+            kind: ExportKind::Marker,
+            is_unsafe: false,
+        },
+        ExportFn {
+            export_name: format!("{safe}_version"),
+            rust_callee: None,
+            params: vec![],
+            ret: FfiType::ConstCChar,
+            kind: ExportKind::Marker,
+            is_unsafe: false,
+        },
+        ExportFn {
+            export_name: format!("{safe}_name"),
+            rust_callee: None,
+            params: vec![],
+            ret: FfiType::ConstCChar,
+            kind: ExportKind::Marker,
+            is_unsafe: false,
+        },
+    ]
+}
+
+fn sha2_exports() -> Vec<ExportFn> {
+    let mut v = marker_exports("sha2", "");
+    v.push(ExportFn {
+        export_name: "sha2_hash_256".into(),
+        rust_callee: None,
+        params: vec![
+            Param {
+                name: "data".into(),
+                ty: FfiType::ConstPtr(Box::new(FfiType::U8)),
+            },
+            Param {
+                name: "len".into(),
+                ty: FfiType::Usize,
+            },
+            Param {
+                name: "out".into(),
+                ty: FfiType::MutPtr(Box::new(FfiType::U8)),
+            },
+        ],
+        ret: FfiType::I32,
+        kind: ExportKind::Enrichment,
+        is_unsafe: false,
+    });
+    v
+}
+
+fn rx4_exports() -> Vec<ExportFn> {
+    let mut v = marker_exports("rx4", "");
+    v.push(ExportFn {
+        export_name: "rx4_agent_new".into(),
+        rust_callee: None,
+        params: vec![],
+        ret: FfiType::MutVoid,
+        kind: ExportKind::Enrichment,
+        is_unsafe: false,
+    });
+    v.push(ExportFn {
+        export_name: "rx4_agent_free".into(),
+        rust_callee: None,
+        params: vec![Param {
+            name: "agent".into(),
+            ty: FfiType::MutVoid,
+        }],
+        ret: FfiType::Void,
+        kind: ExportKind::Enrichment,
+        is_unsafe: false,
+    });
+    v.push(ExportFn {
+        export_name: "rx4_prompt_smoke".into(),
+        rust_callee: None,
+        params: vec![
+            Param {
+                name: "agent".into(),
+                ty: FfiType::MutVoid,
+            },
+            Param {
+                name: "prompt".into(),
+                ty: FfiType::ConstCChar,
+            },
+        ],
+        ret: FfiType::I32,
+        kind: ExportKind::Enrichment,
+        is_unsafe: false,
+    });
+    v
+}
+
+fn header_from_exports(
+    name: &str,
+    lib_name: &str,
+    exports: &[ExportFn],
+    note: Option<&str>,
+) -> String {
+    let safe = crate_ident(name);
+    let guard = format!("RIG_{}_FFI_H", safe.to_uppercase());
+    let mut includes = String::from("#include <stdint.h>\n");
+    if surface::needs_stddef(exports) {
+        includes.push_str("#include <stddef.h>\n");
+    }
+    if surface::needs_stdbool(exports) {
+        includes.push_str("#include <stdbool.h>\n");
+    }
+    let note_line = note.map(|n| format!(" * {n}\n")).unwrap_or_default();
+    format!(
+        "/* Auto-generated by rig — C ABI façade for {name} ({lib_name})\n\
+{note_line} */\n\
+#ifndef {guard}\n\
+#define {guard}\n\
+{includes}\
+#ifdef __cplusplus\n\
+extern \"C\" {{\n\
+#endif\n\
+{}\
+#ifdef __cplusplus\n\
+}}\n\
+#endif\n\
+#endif /* {guard} */\n",
+        surface::emit_c_decls(exports)
+    )
+}
+
+fn write_passthrough_header(
+    out_dir: &Path,
+    name: &str,
+    lib_name: &str,
+) -> Result<(PathBuf, Vec<ExportFn>)> {
+    let exports = marker_exports(name, "");
+    let header = header_from_exports(name, lib_name, &exports, Some("passthrough markers only"));
     let path = out_dir.join(format!("{}_rig_discover.h", crate_ident(name)));
     std::fs::write(
         &path,
@@ -222,9 +483,7 @@ fn write_passthrough_header(out_dir: &Path, name: &str, lib_name: &str) -> Resul
          */\n{header}"
         ),
     )?;
-    // Prefer any existing .h next to the crate if we can find one later; for now
-    // return discovery header.
-    Ok(path)
+    Ok((path, exports))
 }
 
 fn cargo_dep_line(
@@ -376,6 +635,7 @@ pub extern "C" fn rx4_prompt_smoke(agent: *mut Rx4Agent, prompt: *const c_char) 
     .into()
 }
 
+#[allow(dead_code)]
 fn rx4_header() -> String {
     r#"/* Auto-generated by rig — C ABI façade for rx4 */
 #ifndef RIG_RX4_FFI_H
@@ -467,6 +727,7 @@ pub extern "C" fn sha2_hash_256(data: *const u8, len: usize, out: *mut u8) -> i3
     )
 }
 
+#[allow(dead_code)]
 fn sha2_header() -> String {
     r#"/* Auto-generated by rig — C ABI façade for sha2 (ABI 2) */
 #ifndef RIG_SHA2_FFI_H
@@ -489,24 +750,43 @@ int32_t sha2_hash_256(const uint8_t *data, size_t len, uint8_t *out);
     .into()
 }
 
-/// Generate generic façade `lib.rs` for an arbitrary cargo package.
+/// Generate generic façade `lib.rs` for an arbitrary cargo package (markers only).
 pub fn generic_lib_rs(name: &str, version: &str) -> String {
+    generic_lib_rs_with_wraps(name, version, &marker_exports(name, version), "markers only")
+}
+
+fn generic_lib_rs_with_wraps(
+    name: &str,
+    version: &str,
+    exports: &[ExportFn],
+    note: &str,
+) -> String {
     let safe = crate_ident(name);
+    let abi = if exports.iter().any(|e| {
+        matches!(
+            e.kind,
+            ExportKind::AutoWrap | ExportKind::UpstreamExternC
+        )
+    }) {
+        2
+    } else {
+        1
+    };
+    let wraps = surface::emit_rust_wrappers(exports);
     format!(
         r#"//! rig-generated C ABI façade for `{name}`.
-//! Discoverable markers only — arbitrary Rust APIs are not auto-exported.
+//! {note}
 //! This façade crate may contain `unsafe` even when `{name}` forbids it.
 
 use std::os::raw::c_char;
 
-// Pull the dependency into the link graph (markers do not call into it yet).
-#[allow(unused_imports)]
-use {safe} as _;
+#[allow(dead_code, unused_imports)]
+use {safe};
 
-/// Façade ABI revision (bump when symbols/semantics change).
+/// Façade ABI revision (2 when auto-wrap exports are present).
 #[no_mangle]
 pub extern "C" fn {safe}_abi_version() -> u32 {{
-    1
+    {abi}
 }}
 
 /// Null-terminated version string pinned by rig at generate time.
@@ -520,34 +800,13 @@ pub extern "C" fn {safe}_version() -> *const c_char {{
 pub extern "C" fn {safe}_name() -> *const c_char {{
     concat!("{name}", "\0").as_ptr() as *const c_char
 }}
-"#
+{wraps}"#
     )
 }
 
-/// Generate generic C header matching [`generic_lib_rs`].
+/// Generate generic C header matching markers (+ optional auto-wrap decls).
 pub fn generic_header(name: &str, lib_name: &str) -> String {
-    let safe = crate_ident(name);
-    format!(
-        r#"/* Auto-generated by rig — C ABI façade for {name} ({lib_name}) */
-#ifndef RIG_{guard}_FFI_H
-#define RIG_{guard}_FFI_H
-#include <stdint.h>
-#ifdef __cplusplus
-extern "C" {{
-#endif
-/** Façade ABI revision (not necessarily the crate semver). */
-uint32_t {safe}_abi_version(void);
-/** Null-terminated version string (static storage). */
-const char *{safe}_version(void);
-/** Null-terminated crate name (static storage). */
-const char *{safe}_name(void);
-#ifdef __cplusplus
-}}
-#endif
-#endif /* RIG_{guard}_FFI_H */
-"#,
-        guard = safe.to_uppercase()
-    )
+    header_from_exports(name, lib_name, &marker_exports(name, ""), None)
 }
 
 /// Copy built cdylib (+ header) into `out_dir`.
@@ -614,7 +873,7 @@ mod tests {
         assert!(lib.contains("fn sha2_version"));
         assert!(lib.contains("fn sha2_name"));
         assert!(!lib.contains("_rig_version"));
-        assert!(lib.contains("use sha2 as _"));
+        assert!(lib.contains("use sha2"));
         let hdr = generic_header("sha2", "sha2_ffi");
         assert!(hdr.contains("sha2_abi_version"));
         assert!(hdr.contains("sha2_name"));
@@ -624,7 +883,7 @@ mod tests {
     fn hyphenated_crate_idents() {
         let lib = generic_lib_rs("crypto-common", "0.1.0");
         assert!(lib.contains("fn crypto_common_abi_version"));
-        assert!(lib.contains("use crypto_common as _"));
+        assert!(lib.contains("use crypto_common"));
     }
 
     #[test]
@@ -645,6 +904,36 @@ mod tests {
         assert!(lib.contains("Sha256"));
         let hdr = sha2_header();
         assert!(hdr.contains("sha2_hash_256"));
+    }
+
+    #[test]
+    fn auto_wrap_emits_prefixed_exports() {
+        let mut exports = marker_exports("simple_api", "0.1.0");
+        exports.push(ExportFn {
+            export_name: "simple_api_add".into(),
+            rust_callee: Some("simple_api::add".into()),
+            params: vec![
+                Param {
+                    name: "a".into(),
+                    ty: FfiType::I32,
+                },
+                Param {
+                    name: "b".into(),
+                    ty: FfiType::I32,
+                },
+            ],
+            ret: FfiType::I32,
+            kind: ExportKind::AutoWrap,
+            is_unsafe: false,
+        });
+        let lib = generic_lib_rs_with_wraps("simple_api", "0.1.0", &exports, "test");
+        assert!(lib.contains("fn simple_api_abi_version"));
+        assert!(lib.contains("fn simple_api_add"));
+        assert!(lib.contains("simple_api::add"));
+        assert!(lib.contains("2"), "ABI should bump toward 2: {lib}");
+        let hdr = header_from_exports("simple_api", "simple_api_ffi", &exports, None);
+        assert!(hdr.contains("simple_api_add"));
+        assert!(hdr.contains("int32_t"));
     }
 
     #[test]

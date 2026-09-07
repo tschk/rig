@@ -1,14 +1,12 @@
 //! Zig host ← cargo package expose via equilibrium-ffi + C ABI façade.
 
+use crate::expose::api_scan::ExportFn;
+use crate::expose::surface;
 use crate::manifest::Dependency;
 use anyhow::{Context, Result};
 use std::path::Path;
 
 /// Write Zig consumer bindings for a built C ABI surface.
-///
-/// Portable `extern "c"` declarations are the stable API. When a header is
-/// available, `equilibrium_ffi::generate_imports` runs and its output is kept as
-/// commented provenance (avoids duplicate symbols / `@cImport` include issues).
 pub fn write_zig_bindings(
     out: &Path,
     name: &str,
@@ -16,6 +14,7 @@ pub fn write_zig_bindings(
     header: Option<&Path>,
     lib_name: &str,
     native_dir: &str,
+    exports: &[ExportFn],
 ) -> Result<()> {
     let ver = dep.version.as_deref().unwrap_or("*");
     let mut body = String::new();
@@ -58,33 +57,15 @@ pub fn write_zig_bindings(
     }
 
     body.push_str("// --- portable extern \"c\" (canonical façade) ---\n");
-    match name {
-        "rx4" | "rotary" => {
-            body.push_str(
-                "pub extern \"c\" fn rx4_abi_version() u32;\n\
-                 pub extern \"c\" fn rx4_version() [*:0]const u8;\n\
-                 pub extern \"c\" fn rx4_name() [*:0]const u8;\n\
-                 pub extern \"c\" fn rx4_agent_new() ?*anyopaque;\n\
-                 pub extern \"c\" fn rx4_agent_free(agent: ?*anyopaque) void;\n\
-                 pub extern \"c\" fn rx4_prompt_smoke(agent: ?*anyopaque, prompt: [*:0]const u8) i32;\n",
-            );
-        }
-        "sha2" => {
-            body.push_str(
-                "pub extern \"c\" fn sha2_abi_version() u32;\n\
-                 pub extern \"c\" fn sha2_version() [*:0]const u8;\n\
-                 pub extern \"c\" fn sha2_name() [*:0]const u8;\n\
-                 pub extern \"c\" fn sha2_hash_256(data: [*]const u8, len: usize, out: *[32]u8) i32;\n",
-            );
-        }
-        _ => {
-            let safe = name.replace('-', "_");
-            body.push_str(&format!(
-                "pub extern \"c\" fn {safe}_abi_version() u32;\n\
-                 pub extern \"c\" fn {safe}_version() [*:0]const u8;\n\
-                 pub extern \"c\" fn {safe}_name() [*:0]const u8;\n"
-            ));
-        }
+    if exports.is_empty() {
+        let safe = name.replace('-', "_");
+        body.push_str(&format!(
+            "pub extern \"c\" fn {safe}_abi_version() u32;\n\
+             pub extern \"c\" fn {safe}_version() [*:0]const u8;\n\
+             pub extern \"c\" fn {safe}_name() [*:0]const u8;\n"
+        ));
+    } else {
+        body.push_str(&surface::emit_zig_externs(exports));
     }
     body.push_str(&format!(
         "\npub const package_name = \"{name}\";\n\

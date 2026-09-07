@@ -1,5 +1,7 @@
 //! Nim host ← cargo package via generic C ABI façade.
 
+use crate::expose::api_scan::ExportFn;
+use crate::expose::surface;
 use crate::manifest::Dependency;
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -11,6 +13,7 @@ pub fn write_nim_bindings(
     dep: &Dependency,
     lib_name: &str,
     native_dir: &str,
+    exports: &[ExportFn],
 ) -> Result<()> {
     let ver = dep.version.as_deref().unwrap_or("*");
     let safe = name.replace('-', "_");
@@ -22,34 +25,25 @@ pub fn write_nim_bindings(
          {{.passL: \"-L{native_dir}\".}}\n\
          {{.passL: \"-l{lib_name}\".}}\n\
          {{.passL: \"-Wl,-rpath,{native_dir}\".}}\n\
-         \n\
-         proc {safe}_abi_version*(): cuint {{.importc, cdecl.}}\n\
-         proc {safe}_version*(): cstring {{.importc, cdecl.}}\n\
-         proc {safe}_name*(): cstring {{.importc, cdecl.}}\n\
-         \n\
+         \n"
+    ));
+    if exports.is_empty() {
+        body.push_str(&format!(
+            "proc {safe}_abi_version*(): cuint {{.importc, cdecl.}}\n\
+             proc {safe}_version*(): cstring {{.importc, cdecl.}}\n\
+             proc {safe}_name*(): cstring {{.importc, cdecl.}}\n"
+        ));
+    } else {
+        body.push_str(&surface::emit_nim_procs(exports));
+    }
+    body.push_str(&format!(
+        "\n\
          const\n\
            packageName* = \"{name}\"\n\
            packageVersion* = \"{ver}\"\n\
            nativeLib* = \"{lib_name}\"\n\
            nativeDir* = \"{native_dir}\"\n"
     ));
-
-    if matches!(name, "rx4" | "rotary") {
-        body.push_str(
-            "\n\
-             # rx4 enrichment (ABI 2)\n\
-             proc rx4_agent_new*(): pointer {.importc, cdecl.}\n\
-             proc rx4_agent_free*(agent: pointer) {.importc, cdecl.}\n\
-             proc rx4_prompt_smoke*(agent: pointer; prompt: cstring): cint {.importc, cdecl.}\n",
-        );
-    }
-    if name == "sha2" {
-        body.push_str(
-            "\n\
-             # sha2 enrichment (ABI 2)\n\
-             proc sha2_hash_256*(data: ptr uint8; len: csize_t; out: ptr uint8): cint {.importc, cdecl.}\n",
-        );
-    }
 
     std::fs::write(out, body).with_context(|| format!("write {}", out.display()))?;
     Ok(())
@@ -78,6 +72,7 @@ pub fn write_nim_path_git_stub(out: &Path, name: &str, dep: &Dependency) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::expose::api_scan::{ExportFn, ExportKind, FfiType};
     use crate::manifest::Dependency;
 
     fn dep(version: &str) -> Dependency {
@@ -99,10 +94,37 @@ mod tests {
     fn nim_bindings_emit_importc_and_passl() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("sha2.nim");
-        write_nim_bindings(&out, "sha2", &dep("0.10.9"), "sha2_ffi", "target/rig/sha2").unwrap();
+        let exports = vec![
+            ExportFn {
+                export_name: "sha2_abi_version".into(),
+                rust_callee: None,
+                params: vec![],
+                ret: FfiType::U32,
+                kind: ExportKind::Marker,
+                is_unsafe: false,
+            },
+            ExportFn {
+                export_name: "sha2_hash_256".into(),
+                rust_callee: None,
+                params: vec![],
+                ret: FfiType::I32,
+                kind: ExportKind::Enrichment,
+                is_unsafe: false,
+            },
+        ];
+        write_nim_bindings(
+            &out,
+            "sha2",
+            &dep("0.10.9"),
+            "sha2_ffi",
+            "target/rig/sha2",
+            &exports,
+        )
+        .unwrap();
         let text = std::fs::read_to_string(&out).unwrap();
-        assert!(text.contains("proc sha2_abi_version*(): cuint"));
+        assert!(text.contains("proc sha2_abi_version*():"));
         assert!(text.contains("{.passL: \"-lsha2_ffi\".}"));
         assert!(text.contains("{.importc, cdecl.}"));
+        assert!(text.contains("sha2_hash_256"));
     }
 }

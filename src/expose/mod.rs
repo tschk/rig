@@ -1,3 +1,5 @@
+pub mod api_scan;
+pub mod surface;
 pub mod c_host;
 pub mod csharp_host;
 pub mod d_host;
@@ -97,6 +99,7 @@ fn expose_one(
                 Some(&built.artifacts.header),
                 &built.artifacts.lib_name,
                 &native_rel,
+                &built.artifacts.exports,
             )?;
             // Also copy header next to bindings for @cImport consumers.
             if let Some(parent) = out_path.parent() {
@@ -128,6 +131,7 @@ fn expose_one(
                 dep,
                 &built.artifacts.lib_name,
                 &native_rel,
+                &built.artifacts.exports,
             )?;
             if let Some(parent) = out_path.parent() {
                 let _ = std::fs::copy(
@@ -171,6 +175,7 @@ fn expose_one(
                 dep,
                 &built.artifacts.lib_name,
                 &native_rel,
+                &built.artifacts.exports,
             )?;
             if let Some(parent) = out_path.parent() {
                 let _ = std::fs::copy(
@@ -186,7 +191,14 @@ fn expose_one(
                 .as_ref()
                 .and_then(|o| o.native.clone())
                 .unwrap_or_else(|| format!("{}/{}", ctx.manifest.expose.build_dir, name));
-            d_host::write_d_bindings(&out_path, name, dep, &built.artifacts.lib_name, &native_rel)?;
+            d_host::write_d_bindings(
+                &out_path,
+                name,
+                dep,
+                &built.artifacts.lib_name,
+                &native_rel,
+                &built.artifacts.exports,
+            )?;
             if let Some(parent) = out_path.parent() {
                 let _ = std::fs::copy(
                     &built.artifacts.header,
