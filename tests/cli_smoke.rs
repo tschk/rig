@@ -257,6 +257,10 @@ pub fn build(b: *std.Build) void {
     let text = std::fs::read_to_string(&bindings).unwrap();
     assert!(text.contains("native_lib"), "{text}");
     assert!(text.contains("zmath_native"), "{text}");
+    assert!(
+        text.contains("zmath_add"),
+        "expected scanned Zig export fn in binder:\n{text}"
+    );
 
     let native = dir.path().join("target/rig/zmath");
     assert!(native.is_dir(), "expected native out dir");

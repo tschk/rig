@@ -13,6 +13,7 @@ pub mod shim;
 pub mod stamp;
 pub mod surface;
 pub mod v_host;
+pub mod zig_export_scan;
 pub mod zig_host;
 
 use crate::detect::Language;
