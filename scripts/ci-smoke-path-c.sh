@@ -51,13 +51,39 @@ cat > vendor/cmlibel/cmlibel.c <<'EOF'
 int cmlibel_mul(int a, int b) { return a * b; }
 EOF
 
+# Meson vendor (skip if meson/ninja missing)
+if command -v meson >/dev/null 2>&1 && command -v ninja >/dev/null 2>&1; then
+  mkdir -p vendor/mesonlib
+  cat > vendor/mesonlib/meson.build <<'EOF'
+project('mesonlib', 'c')
+shared_library('mesonlib_native', 'mesonlib.c')
+EOF
+  cat > vendor/mesonlib/mesonlib.h <<'EOF'
+#pragma once
+int mesonlib_sub(int a, int b);
+EOF
+  cat > vendor/mesonlib/mesonlib.c <<'EOF'
+#include "mesonlib.h"
+int mesonlib_sub(int a, int b) { return a - b; }
+EOF
+else
+  echo "ci-smoke-path-c: skip meson fixture (meson/ninja missing)"
+fi
+
 "$RIG" init
 "$RIG" add --c "path:$WORK/vendor/flatlib"
 "$RIG" add --c "path:$WORK/vendor/cmlibel"
+if [[ -d vendor/mesonlib ]]; then
+  "$RIG" add --c "path:$WORK/vendor/mesonlib"
+fi
 
 test -f src/rig_bindings/flatlib.h
 test -f src/rig_bindings/cmlibel.h
 ls target/rig/flatlib/*flatlib_native* >/dev/null
 ls target/rig/cmlibel/*cmlibel_native* >/dev/null
+if [[ -d vendor/mesonlib ]]; then
+  test -f src/rig_bindings/mesonlib.h
+  ls target/rig/mesonlib/*mesonlib_native* >/dev/null
+fi
 
-echo "ci-smoke-path-c: OK (flat + cmake)"
+echo "ci-smoke-path-c: OK (flat + cmake + meson if present)"

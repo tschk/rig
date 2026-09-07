@@ -148,3 +148,45 @@ fn upgrade_empty_is_noop() {
         .success()
         .stdout(predicate::str::contains("nothing to upgrade"));
 }
+
+#[test]
+fn base64_enrichment_facade_builds_on_c_host() {
+    let dir = tempfile::tempdir().unwrap();
+    write_c_host(dir.path());
+
+    rig()
+        .current_dir(dir.path())
+        .args(["init"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("host: c"));
+
+    rig()
+        .current_dir(dir.path())
+        .args(["add", "--rust", "base64@0.22.1", "-y"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("added"));
+
+    let host_hdr = fs::read_to_string(dir.path().join("src/rig_bindings/base64.h")).unwrap();
+    assert!(
+        host_hdr.contains("base64_ffi.h") || host_hdr.contains("base64_encode"),
+        "{host_hdr}"
+    );
+    let ffi_hdr = dir.path().join("src/rig_bindings/base64_ffi.h");
+    let ffi_hdr2 = dir.path().join(".rig/shims/base64/base64_ffi.h");
+    let hdr_path = if ffi_hdr.is_file() { ffi_hdr } else { ffi_hdr2 };
+    let hdr = fs::read_to_string(&hdr_path).unwrap();
+    assert!(hdr.contains("base64_encode"), "{hdr}");
+    assert!(hdr.contains("base64_decode"), "{hdr}");
+    let lib = dir.path().join(".rig/shims/base64/src/lib.rs");
+    let lib_txt = fs::read_to_string(&lib).unwrap();
+    assert!(lib_txt.contains("fn base64_encode"), "{lib_txt}");
+    let native = dir.path().join("target/rig/base64");
+    let has_lib = fs::read_dir(&native).unwrap().any(|e| {
+        let n = e.unwrap().file_name().to_string_lossy().into_owned();
+        n.contains("base64_ffi")
+            && (n.ends_with(".dylib") || n.ends_with(".so") || n.ends_with(".dll"))
+    });
+    assert!(has_lib, "expected base64_ffi cdylib");
+}

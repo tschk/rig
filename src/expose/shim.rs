@@ -1240,19 +1240,20 @@ pub extern "C" fn base64_encode(
     if len > 0 && data.is_null() {{
         return -1;
     }}
+    let need = len.saturating_mul(4).div_ceil(3);
+    if out_len < need {{
+        return -3;
+    }}
     let input = if len == 0 {{
         &[][..]
     }} else {{
         unsafe {{ slice::from_raw_parts(data, len) }}
     }};
-    let encoded = STANDARD.encode(input);
-    if out_len < encoded.len() {{
-        return -3;
+    let out_slice = unsafe {{ slice::from_raw_parts_mut(out, out_len) }};
+    match STANDARD.encode_slice(input, out_slice) {{
+        Ok(_) => 0,
+        Err(_) => -3,
     }}
-    unsafe {{
-        slice::from_raw_parts_mut(out, encoded.len()).copy_from_slice(encoded.as_bytes());
-    }}
-    0
 }}
 
 /// Base64-decode `len` ASCII bytes at `data` into `out`.
@@ -1275,16 +1276,9 @@ pub extern "C" fn base64_decode(
     }} else {{
         unsafe {{ slice::from_raw_parts(data, len) }}
     }};
-    match STANDARD.decode(input) {{
-        Ok(bytes) => {{
-            if out_len < bytes.len() {{
-                return -3;
-            }}
-            unsafe {{
-                slice::from_raw_parts_mut(out, bytes.len()).copy_from_slice(&bytes);
-            }}
-            0
-        }}
+    let out_slice = unsafe {{ slice::from_raw_parts_mut(out, out_len) }};
+    match STANDARD.decode_slice(input, out_slice) {{
+        Ok(_) => 0,
         Err(_) => -4,
     }}
 }}
@@ -1493,7 +1487,7 @@ mod tests {
         assert!(lib.contains("fn base64_abi_version"));
         assert!(lib.contains("fn base64_encode"));
         assert!(lib.contains("fn base64_decode"));
-        assert!(lib.contains("STANDARD.encode"));
+        assert!(lib.contains("STANDARD.encode_slice"));
         let exports = base64_exports();
         assert!(exports.iter().any(|e| e.export_name == "base64_encode"));
         assert!(exports.iter().any(|e| e.export_name == "base64_decode"));

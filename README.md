@@ -192,5 +192,5 @@ ISC
 ## CI
 
 GitHub Actions runs `fmt` / `clippy -D warnings` / `cargo test` on Ubuntu + macOS (+ Windows tests).
-An optional **path-c-smoke** job on Ubuntu exercises flat-C and CMake path/git fixtures via `scripts/ci-smoke-path-c.sh` (cmake/ninja).
+An optional **path-c-smoke** job on Ubuntu exercises flat-C and CMake path/git fixtures via `scripts/ci-smoke-path-c.sh` (cmake/ninja; meson when present).
 `scripts/ci-smoke-path-extra.sh` additionally tries a Zig path fixture when `zig` is on `PATH` (skipped otherwise). Nim/V/Odin/Hare e2e compile smokes run locally when those toolchains are present (`cargo test` skips them quietly on stock CI).
