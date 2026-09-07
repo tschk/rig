@@ -245,6 +245,15 @@ path = "src/lib.rs"
                 ScanReport::default(),
             )
         }
+        "base64" => {
+            let exports = base64_exports();
+            (
+                base64_lib_rs(version),
+                header_from_exports("base64", &lib_name, &exports, None),
+                exports,
+                ScanReport::default(),
+            )
+        }
         _ => build_generic_surface(name, version, path_hint.as_deref(), &cache, &lib_name, &dir)?,
     };
 
@@ -1129,6 +1138,160 @@ pub extern "C" fn hex_decode(
     )
 }
 
+fn base64_exports() -> Vec<ExportFn> {
+    let mut v = marker_exports("base64", "");
+    let io = vec![
+        Param {
+            name: "data".into(),
+            ty: FfiType::ConstPtr(Box::new(FfiType::U8)),
+            adapt: Default::default(),
+        },
+        Param {
+            name: "len".into(),
+            ty: FfiType::Usize,
+            adapt: Default::default(),
+        },
+        Param {
+            name: "out".into(),
+            ty: FfiType::MutPtr(Box::new(FfiType::U8)),
+            adapt: Default::default(),
+        },
+        Param {
+            name: "out_len".into(),
+            ty: FfiType::Usize,
+            adapt: Default::default(),
+        },
+    ];
+    v.push(ExportFn {
+        export_name: "base64_encode_len".into(),
+        rust_callee: None,
+        params: vec![Param {
+            name: "len".into(),
+            ty: FfiType::Usize,
+            adapt: Default::default(),
+        }],
+        ret: FfiType::Usize,
+        ret_adapt: Default::default(),
+        kind: ExportKind::Enrichment,
+        is_unsafe: false,
+    });
+    v.push(ExportFn {
+        export_name: "base64_encode".into(),
+        rust_callee: None,
+        params: io.clone(),
+        ret: FfiType::I32,
+        ret_adapt: Default::default(),
+        kind: ExportKind::Enrichment,
+        is_unsafe: false,
+    });
+    v.push(ExportFn {
+        export_name: "base64_decode".into(),
+        rust_callee: None,
+        params: io,
+        ret: FfiType::I32,
+        ret_adapt: Default::default(),
+        kind: ExportKind::Enrichment,
+        is_unsafe: false,
+    });
+    v
+}
+
+fn base64_lib_rs(version: &str) -> String {
+    format!(
+        r#"//! rig-generated C ABI façade for `base64` (markers + STANDARD encode/decode).
+
+use base64::{{engine::general_purpose::STANDARD, Engine as _}};
+use std::os::raw::c_char;
+use std::slice;
+
+#[no_mangle]
+pub extern "C" fn base64_abi_version() -> u32 {{
+    2
+}}
+
+#[no_mangle]
+pub extern "C" fn base64_version() -> *const c_char {{
+    concat!("{version}", "\0").as_ptr() as *const c_char
+}}
+
+#[no_mangle]
+pub extern "C" fn base64_name() -> *const c_char {{
+    b"base64\0".as_ptr() as *const c_char
+}}
+
+/// Bytes needed to base64-encode `len` input bytes (no NUL).
+#[no_mangle]
+pub extern "C" fn base64_encode_len(len: usize) -> usize {{
+    len.saturating_mul(4).div_ceil(3)
+}}
+
+/// Base64-encode `len` bytes at `data` into `out` (STANDARD alphabet).
+/// Returns 0 ok; -1 null data; -2 null out; -3 out_len too small.
+#[no_mangle]
+pub extern "C" fn base64_encode(
+    data: *const u8,
+    len: usize,
+    out: *mut u8,
+    out_len: usize,
+) -> i32 {{
+    if out.is_null() {{
+        return -2;
+    }}
+    if len > 0 && data.is_null() {{
+        return -1;
+    }}
+    let input = if len == 0 {{
+        &[][..]
+    }} else {{
+        unsafe {{ slice::from_raw_parts(data, len) }}
+    }};
+    let encoded = STANDARD.encode(input);
+    if out_len < encoded.len() {{
+        return -3;
+    }}
+    unsafe {{
+        slice::from_raw_parts_mut(out, encoded.len()).copy_from_slice(encoded.as_bytes());
+    }}
+    0
+}}
+
+/// Base64-decode `len` ASCII bytes at `data` into `out`.
+/// Returns 0 ok; -1 null data; -2 null out; -3 out_len too small; -4 invalid base64.
+#[no_mangle]
+pub extern "C" fn base64_decode(
+    data: *const u8,
+    len: usize,
+    out: *mut u8,
+    out_len: usize,
+) -> i32 {{
+    if out.is_null() {{
+        return -2;
+    }}
+    if len > 0 && data.is_null() {{
+        return -1;
+    }}
+    let input = if len == 0 {{
+        &[][..]
+    }} else {{
+        unsafe {{ slice::from_raw_parts(data, len) }}
+    }};
+    match STANDARD.decode(input) {{
+        Ok(bytes) => {{
+            if out_len < bytes.len() {{
+                return -3;
+            }}
+            unsafe {{
+                slice::from_raw_parts_mut(out, bytes.len()).copy_from_slice(&bytes);
+            }}
+            0
+        }}
+        Err(_) => -4,
+    }}
+}}
+"#
+    )
+}
+
 /// Generate generic façade `lib.rs` for an arbitrary cargo package (markers only).
 pub fn generic_lib_rs(name: &str, version: &str) -> String {
     generic_lib_rs_with_wraps(
@@ -1322,6 +1485,18 @@ mod tests {
         let exports = hex_exports();
         assert!(exports.iter().any(|e| e.export_name == "hex_encode"));
         assert!(exports.iter().any(|e| e.export_name == "hex_decode"));
+    }
+
+    #[test]
+    fn base64_enrichment_exports_encode_decode() {
+        let lib = base64_lib_rs("0.22.1");
+        assert!(lib.contains("fn base64_abi_version"));
+        assert!(lib.contains("fn base64_encode"));
+        assert!(lib.contains("fn base64_decode"));
+        assert!(lib.contains("STANDARD.encode"));
+        let exports = base64_exports();
+        assert!(exports.iter().any(|e| e.export_name == "base64_encode"));
+        assert!(exports.iter().any(|e| e.export_name == "base64_decode"));
     }
 
     #[test]

@@ -379,11 +379,10 @@ fn add_path_hare_missing_toolchain_is_honest() {
 }
 
 fn toolchain_ok(bin: &str) -> bool {
-    // Odin uses `odin version` (no --version).
-    let args: &[&str] = if bin == "odin" {
-        &["version"]
-    } else {
-        &["--version"]
+    // Odin: `odin version`. Zig: `zig version`. Others: `--version`.
+    let args: &[&str] = match bin {
+        "odin" | "zig" => &["version"],
+        _ => &["--version"],
     };
     std::process::Command::new(bin)
         .args(args)
@@ -679,4 +678,63 @@ fn odin_host_path_c_emits_header_procs_when_odin_present() {
         "expected discovered C prototype in odin binder:\n{text}"
     );
     assert!(text.contains("foreign rig_lib"), "{text}");
+}
+
+#[test]
+fn zig_host_path_c_emits_externs_from_headers() {
+    if !toolchain_ok("zig") {
+        eprintln!("skip: zig not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("build.zig"),
+        r#"const std = @import("std");
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const exe = b.addExecutable(.{ .name = "demo", .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig"), .target = target, .optimize = optimize }) });
+    b.installArtifact(exe);
+}
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/main.zig"), "pub fn main() void {}\n").unwrap();
+
+    let vendor = dir.path().join("vendor/flatlib");
+    std::fs::create_dir_all(&vendor).unwrap();
+    std::fs::write(
+        vendor.join("flatlib.h"),
+        "#pragma once\nint flatlib_add(int a, int b);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        vendor.join("flatlib.c"),
+        "#include \"flatlib.h\"\nint flatlib_add(int a, int b) { return a + b; }\n",
+    )
+    .unwrap();
+
+    rig()
+        .current_dir(dir.path())
+        .args(["init"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("host: zig"));
+
+    let path_spec = format!("path:{}", vendor.display());
+    rig()
+        .current_dir(dir.path())
+        .args(["add", "--c", &path_spec])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("added"));
+
+    let bindings = dir.path().join("src/rig_bindings/flatlib_bindings.zig");
+    assert!(bindings.is_file(), "expected zig bindings");
+    let text = std::fs::read_to_string(&bindings).unwrap();
+    assert!(
+        text.contains("flatlib_add"),
+        "expected discovered C prototype in zig binder:\n{text}"
+    );
 }

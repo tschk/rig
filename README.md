@@ -137,7 +137,7 @@ For every `rig add --rust <crate>` on a Zig (or other non-Rust) host, rig genera
 | `{crate}_version` | Null-terminated version string |
 | `{crate}_name` | Null-terminated crate name |
 
-Known enrichments (today: `rx4`, `sha2`, `crc32fast`, `md-5`, `hex`) may export additional **methods** beyond the markers (e.g. `rx4_prompt_smoke`, `sha2_hash_256`, `hex_encode`).
+Known enrichments (today: `rx4`, `sha2`, `crc32fast`, `md-5`, `hex`, `base64`) may export additional **methods** beyond the markers (e.g. `rx4_prompt_smoke`, `sha2_hash_256`, `hex_encode`, `base64_encode`).
 
 For other crates, rig **auto-wraps** a scanned public surface when sources are available (cargo registry / path / crates.io fetch):
 
