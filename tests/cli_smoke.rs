@@ -569,3 +569,55 @@ fn v_host_cargo_facade_compiles_when_v_present() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn nim_host_path_c_emits_header_procs_when_nim_present() {
+    if !toolchain_ok("nim") {
+        eprintln!("skip: nim not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("demo.nimble"),
+        "version = \"0.1.0\"\nauthor = \"rig\"\ndescription = \"demo\"\nlicense = \"ISC\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/main.nim"), "echo \"hi\"\n").unwrap();
+
+    let vendor = dir.path().join("vendor/flatlib");
+    std::fs::create_dir_all(&vendor).unwrap();
+    std::fs::write(
+        vendor.join("flatlib.h"),
+        "#pragma once\nint flatlib_add(int a, int b);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        vendor.join("flatlib.c"),
+        "#include \"flatlib.h\"\nint flatlib_add(int a, int b) { return a + b; }\n",
+    )
+    .unwrap();
+
+    rig()
+        .current_dir(dir.path())
+        .args(["init"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("host: nim"));
+
+    let path_spec = format!("path:{}", vendor.display());
+    rig()
+        .current_dir(dir.path())
+        .args(["add", "--c", &path_spec])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("added"));
+
+    let binding = dir.path().join("src/rig_bindings/flatlib.nim");
+    assert!(binding.is_file(), "expected nim path binding");
+    let text = std::fs::read_to_string(&binding).unwrap();
+    assert!(
+        text.contains("proc flatlib_add*"),
+        "expected discovered C prototype in nim binder:\n{text}"
+    );
+}

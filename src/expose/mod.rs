@@ -1,4 +1,5 @@
 pub mod api_scan;
+pub mod c_header_scan;
 pub mod c_host;
 pub mod csharp_host;
 pub mod d_host;
