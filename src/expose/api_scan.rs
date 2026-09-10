@@ -734,10 +734,19 @@ fn collect_root_api_names(crate_root: &Path) -> BTreeSet<String> {
         let Ok(text) = std::fs::read_to_string(path) else {
             continue;
         };
+        let mut cfg_gated = false;
         for line in text.lines() {
             let t = line.trim();
+            // cfg-gated re-exports may not exist in the default-feature build.
+            if t.starts_with("#[cfg(") {
+                cfg_gated = true;
+                continue;
+            }
             if t.starts_with("pub use ") {
-                extract_use_idents(t, &mut names);
+                if !cfg_gated {
+                    extract_use_idents(t, &mut names);
+                }
+                cfg_gated = false;
             }
         }
     }

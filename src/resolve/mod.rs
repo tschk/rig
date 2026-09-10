@@ -171,27 +171,12 @@ pub enum SearchOutcome {
     Unsupported(String),
 }
 
-pub fn infer_ecosystem(
-    host: Language,
-    flag: Option<Language>,
-    spec: &PackageSpec,
-) -> Result<Language> {
+pub fn infer_ecosystem(host: Language, flag: Option<Language>) -> Result<Language> {
     if let Some(f) = flag {
         return Ok(f);
     }
-    if spec
-        .git
-        .as_deref()
-        .is_some_and(|g| g.contains("github.com/tschk/rotary"))
-        || spec.name == "rx4"
-        || spec.name == "rotary"
-    {
-        return Ok(Language::Rust);
-    }
-    match host {
-        Language::Rust => Ok(Language::Rust),
-        other => Ok(other),
-    }
+
+    Ok(host)
 }
 
 pub fn ensure_packages(pkgs: &[String]) -> Result<()> {

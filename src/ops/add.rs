@@ -26,7 +26,7 @@ pub fn run(args: &AddArgs, g: &Globals) -> Result<u8> {
 
     for pkg in &args.packages {
         let spec = PackageSpec::parse(pkg)?;
-        let eco = resolve::infer_ecosystem(ctx.host.language, args.eco.language(), &spec)?;
+        let eco = resolve::infer_ecosystem(ctx.host.language, args.eco.language())?;
         let resolved = resolve::resolve(eco, &spec, features.clone(), args.no_default_features)?;
 
         let mut expose_opts = ExposeOpts {

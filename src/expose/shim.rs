@@ -110,25 +110,16 @@ fn lib_name_from_cargo(cargo_toml: &Path, fallback: &str) -> String {
     crate_ident(fallback)
 }
 
-fn resolve_dep_path(
-    name: &str,
-    resolved: Option<&ResolvedPackage>,
-    dep: &Dependency,
-) -> Option<PathBuf> {
-    if let Some(path) = resolved
+fn resolve_dep_path(resolved: Option<&ResolvedPackage>, dep: &Dependency) -> Option<PathBuf> {
+    let path = resolved
         .and_then(|r| r.path.as_deref())
-        .or(dep.path.as_deref())
-    {
-        let pb = PathBuf::from(path);
-        if pb.join("Cargo.toml").is_file() {
-            return Some(pb);
-        }
+        .or(dep.path.as_deref())?;
+    let pb = PathBuf::from(path);
+    if pb.join("Cargo.toml").is_file() {
+        Some(pb)
+    } else {
+        None
     }
-    let crate_name = if name == "rotary" { "rx4" } else { name };
-    if crate_name == "rx4" {
-        return find_local_rotary();
-    }
-    None
 }
 
 /// Ensure a façade (or passthrough) exists for `name`. Returns paths for native build.
@@ -142,7 +133,7 @@ pub fn ensure_shim(
     std::fs::create_dir_all(&out_dir)?;
 
     // Passthrough: upstream already ships a cdylib — build it directly.
-    if let Some(path) = resolve_dep_path(name, resolved, dep) {
+    if let Some(path) = resolve_dep_path(resolved, dep) {
         let manifest = path.join("Cargo.toml");
         if crate_has_cdylib(&manifest) {
             let lib_name = lib_name_from_cargo(&manifest, name);
@@ -196,19 +187,10 @@ path = "src/lib.rs"
     );
     std::fs::write(dir.join("Cargo.toml"), cargo_toml)?;
 
-    let path_hint = resolve_dep_path(name, resolved, dep);
+    let path_hint = resolve_dep_path(resolved, dep);
     let cache = ctx.root.join(&ctx.manifest.expose.cache).join("crates");
 
     let (lib_rs, header, exports, scan) = match name {
-        "rx4" | "rotary" => {
-            let exports = rx4_exports();
-            (
-                rx4_lib_rs(),
-                header_from_exports(name, &lib_name, &exports, None),
-                exports,
-                ScanReport::default(),
-            )
-        }
         "sha2" => {
             let exports = sha2_exports();
             (
@@ -488,53 +470,6 @@ fn md5_exports() -> Vec<ExportFn> {
     v
 }
 
-fn rx4_exports() -> Vec<ExportFn> {
-    let mut v = marker_exports("rx4", "");
-    v.push(ExportFn {
-        export_name: "rx4_agent_new".into(),
-        rust_callee: None,
-        params: vec![],
-        ret: FfiType::MutVoid,
-        ret_adapt: Default::default(),
-        kind: ExportKind::Enrichment,
-        is_unsafe: false,
-    });
-    v.push(ExportFn {
-        export_name: "rx4_agent_free".into(),
-        rust_callee: None,
-        params: vec![Param {
-            name: "agent".into(),
-            ty: FfiType::MutVoid,
-            adapt: Default::default(),
-        }],
-        ret: FfiType::Void,
-        ret_adapt: Default::default(),
-        kind: ExportKind::Enrichment,
-        is_unsafe: false,
-    });
-    v.push(ExportFn {
-        export_name: "rx4_prompt_smoke".into(),
-        rust_callee: None,
-        params: vec![
-            Param {
-                name: "agent".into(),
-                ty: FfiType::MutVoid,
-                adapt: Default::default(),
-            },
-            Param {
-                name: "prompt".into(),
-                ty: FfiType::ConstCChar,
-                adapt: Default::default(),
-            },
-        ],
-        ret: FfiType::I32,
-        ret_adapt: Default::default(),
-        kind: ExportKind::Enrichment,
-        is_unsafe: false,
-    });
-    v
-}
-
 fn header_from_exports(
     name: &str,
     lib_name: &str,
@@ -594,7 +529,7 @@ fn cargo_dep_line(
     resolved: Option<&ResolvedPackage>,
     dep: &Dependency,
 ) -> Result<String> {
-    let crate_name = if name == "rotary" { "rx4" } else { name };
+    let crate_name = name;
 
     if let Some(path) = resolved
         .and_then(|r| r.path.as_deref())
@@ -615,15 +550,6 @@ fn cargo_dep_line(
         ));
     }
 
-    if crate_name == "rx4"
-        && let Some(local) = find_local_rotary()
-    {
-        return Ok(format!(
-            "rx4 = {{ path = \"{}\", default-features = false }}",
-            escape_toml_str(&local.display().to_string())
-        ));
-    }
-
     let ver = resolved
         .map(|r| r.version.as_str())
         .or(dep.version.as_deref())
@@ -637,146 +563,8 @@ fn cargo_dep_line(
     ))
 }
 
-fn find_local_rotary() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("RIG_RX4_PATH") {
-        let pb = PathBuf::from(p);
-        if pb.join("Cargo.toml").is_file() {
-            return Some(pb);
-        }
-    }
-    let home = dirs::home_dir()?;
-    let cand = home.join("projects/rotary");
-    if cand.join("Cargo.toml").is_file() {
-        return Some(cand);
-    }
-    None
-}
-
 fn escape_toml_str(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn rx4_lib_rs() -> String {
-    r#"//! rig-generated C ABI façade for rx4 (rotary).
-//! Narrow surface for polyglot hosts — not a full Agent loop.
-//!
-//! ABI 2 adds opaque agent handle stubs + prompt smoke (link/call proof).
-//! These do **not** yet drive `rx4::Agent::prompt`.
-
-use std::ffi::{CStr, CString};
-use std::os::raw::c_char;
-use std::sync::OnceLock;
-
-/// Opaque host-facing agent handle (stub — not a live `rx4::Agent`).
-pub struct Rx4Agent {
-    _alive: u8,
-}
-
-/// ABI revision for this façade (bump when symbols/semantics change).
-#[no_mangle]
-pub extern "C" fn rx4_abi_version() -> u32 {
-    2
-}
-
-/// Null-terminated `rx4::VERSION` from the linked rx4 crate.
-#[no_mangle]
-pub extern "C" fn rx4_version() -> *const c_char {
-    static V: OnceLock<CString> = OnceLock::new();
-    V.get_or_init(|| CString::new(rx4::VERSION).expect("rx4::VERSION has interior NUL"))
-        .as_ptr()
-}
-
-/// Null-terminated package name.
-#[no_mangle]
-pub extern "C" fn rx4_name() -> *const c_char {
-    b"rx4\0".as_ptr() as *const c_char
-}
-
-/// Allocate an opaque agent stub. Host must call `rx4_agent_free`.
-#[no_mangle]
-pub extern "C" fn rx4_agent_new() -> *mut Rx4Agent {
-    Box::into_raw(Box::new(Rx4Agent { _alive: 1 }))
-}
-
-/// Free a handle from `rx4_agent_new`. No-op on null.
-#[no_mangle]
-pub extern "C" fn rx4_agent_free(agent: *mut Rx4Agent) {
-    if agent.is_null() {
-        return;
-    }
-    // SAFETY: only pointers from `rx4_agent_new` are valid.
-    unsafe {
-        drop(Box::from_raw(agent));
-    }
-}
-
-/// Link/call smoke: validate handle + UTF-8 prompt without running the agent loop.
-///
-/// Returns:
-/// - `0` success
-/// - `-1` null agent
-/// - `-2` null prompt
-/// - `-3` empty prompt
-/// - `-4` prompt not valid UTF-8
-#[no_mangle]
-pub extern "C" fn rx4_prompt_smoke(agent: *mut Rx4Agent, prompt: *const c_char) -> i32 {
-    if agent.is_null() {
-        return -1;
-    }
-    if prompt.is_null() {
-        return -2;
-    }
-    // SAFETY: caller passes a NUL-terminated C string (or null, handled above).
-    let cstr = unsafe { CStr::from_ptr(prompt) };
-    match cstr.to_str() {
-        Ok(s) if s.is_empty() => -3,
-        Ok(_) => 0,
-        Err(_) => -4,
-    }
-}
-"#
-    .into()
-}
-
-#[allow(dead_code)]
-fn rx4_header() -> String {
-    r#"/* Auto-generated by rig — C ABI façade for rx4 */
-#ifndef RIG_RX4_FFI_H
-#define RIG_RX4_FFI_H
-
-#include <stdint.h>
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-typedef struct Rx4Agent Rx4Agent;
-
-/** Façade ABI revision (not the rx4 crate semver). Currently 2. */
-uint32_t rx4_abi_version(void);
-
-/** Null-terminated rx4 crate version string (static storage). */
-const char *rx4_version(void);
-
-/** Null-terminated package name. */
-const char *rx4_name(void);
-
-/** Allocate opaque agent stub (not a full rx4::Agent). Free with rx4_agent_free. */
-Rx4Agent *rx4_agent_new(void);
-
-/** Free handle from rx4_agent_new. Null-safe. */
-void rx4_agent_free(Rx4Agent *agent);
-
-/** Smoke: prove link+call. 0 ok; -1 null agent; -2 null prompt; -3 empty; -4 bad utf8. */
-int32_t rx4_prompt_smoke(Rx4Agent *agent, const char *prompt);
-
-#ifdef __cplusplus
-}
-#endif
-
-#endif /* RIG_RX4_FFI_H */
-"#
-    .into()
 }
 
 fn sha2_lib_rs(version: &str) -> String {
@@ -1423,16 +1211,6 @@ mod tests {
         let lib = generic_lib_rs("crypto-common", "0.1.0");
         assert!(lib.contains("fn crypto_common_abi_version"));
         assert!(lib.contains("use crypto_common"));
-    }
-
-    #[test]
-    fn rx4_enrichment_keeps_smoke_and_markers() {
-        let lib = rx4_lib_rs();
-        assert!(lib.contains("fn rx4_abi_version"));
-        assert!(lib.contains("fn rx4_version"));
-        assert!(lib.contains("fn rx4_name"));
-        assert!(lib.contains("fn rx4_prompt_smoke"));
-        assert!(lib.contains("fn rx4_agent_new"));
     }
 
     #[test]

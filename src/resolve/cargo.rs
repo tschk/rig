@@ -38,44 +38,11 @@ pub fn resolve(
     }
 
     let name = crate_name_for(spec);
-    // Special-case rx4/rotary → prefer crates.io rx4, note rotary git
-    let (query_name, git_fallback) = if name == "rotary" || name == "rx4" {
-        (
-            "rx4".to_string(),
-            Some("https://github.com/tschk/rotary".to_string()),
-        )
-    } else {
-        (name.clone(), None)
-    };
 
-    match fetch_crates_io(&query_name, spec.version_req.as_deref()) {
-        Ok(mut resolved) => {
-            resolved.features = features;
-            resolved.default_features = if no_default { Some(false) } else { None };
-            // Keep registry resolution; git_fallback is only for lookup failure.
-            let _ = git_fallback;
-            Ok(resolved)
-        }
-        Err(err) => {
-            if let Some(git) = git_fallback {
-                eprintln!("warn: crates.io lookup failed ({err:#}); pinning git {git}");
-                Ok(ResolvedPackage {
-                    name: query_name,
-                    ecosystem: "cargo".into(),
-                    version: spec.version_req.clone().unwrap_or_else(|| "*".into()),
-                    source: format!("git+{git}"),
-                    checksum: None,
-                    git: Some(git),
-                    path: None,
-                    url: None,
-                    features,
-                    default_features: if no_default { Some(false) } else { None },
-                })
-            } else {
-                Err(err)
-            }
-        }
-    }
+    let mut resolved = fetch_crates_io(&name, spec.version_req.as_deref())?;
+    resolved.features = features;
+    resolved.default_features = if no_default { Some(false) } else { None };
+    Ok(resolved)
 }
 
 fn crate_name_for(spec: &PackageSpec) -> String {
