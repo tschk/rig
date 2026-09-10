@@ -11,6 +11,8 @@ pub fn stamp_path(ctx: &AppCtx) -> std::path::PathBuf {
 pub fn compute(ctx: &AppCtx) -> String {
     let mut hasher = Sha256::new();
     let _ = writeln!(hasher, "{}", ctx.manifest.schema_version);
+    let _ = writeln!(hasher, "host|{}", ctx.manifest.host.language);
+    let _ = writeln!(hasher, "expose_dir|{}", ctx.manifest.expose.dir);
     for (k, v) in &ctx.manifest.dependencies {
         let _ = writeln!(hasher, "{k}|{}|{:?}|{}", v.ecosystem, v.version, v.expose);
     }

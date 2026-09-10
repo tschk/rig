@@ -42,18 +42,7 @@ pub fn run(args: &AddArgs, g: &Globals) -> Result<u8> {
                 ctx.manifest.expose.build_dir, resolved.name
             )),
         };
-        let safe = resolved.name.replace('-', "_");
-        let out = match ctx.host.language {
-            Language::Rust => format!("{}/{safe}.rs", ctx.manifest.expose.dir),
-            Language::Zig => format!("{}/{safe}_bindings.zig", ctx.manifest.expose.dir),
-            Language::Nim => format!("{}/{safe}.nim", ctx.manifest.expose.dir),
-            Language::C | Language::Cpp => format!("{}/{safe}.h", ctx.manifest.expose.dir),
-            Language::CSharp => format!("{}/{safe}.cs", ctx.manifest.expose.dir),
-            Language::V => format!("{}/{safe}.v", ctx.manifest.expose.dir),
-            Language::D => format!("{}/{safe}.d", ctx.manifest.expose.dir),
-            Language::Odin => format!("{}/{safe}.odin", ctx.manifest.expose.dir),
-            Language::Hare => format!("{}/{safe}.ha", ctx.manifest.expose.dir),
-        };
+        let out = expose::expected_binder_rel(&ctx.manifest, &resolved.name, ctx.host.language);
         expose_opts.out = Some(out.clone());
 
         let dep_git = if resolved.source.starts_with("git+") {

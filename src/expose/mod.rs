@@ -400,11 +400,16 @@ fn default_out(manifest: &Manifest, name: &str, consumer: Language) -> String {
         Language::Nim => format!("{dir}/{safe}.nim"),
         Language::C | Language::Cpp => format!("{dir}/{safe}.h"),
         Language::CSharp => format!("{dir}/{safe}.cs"),
-        Language::V => format!("{dir}/{safe}.v"),
+        Language::V => format!("modules/{safe}/{safe}.v"),
         Language::D => format!("{dir}/{safe}.d"),
         Language::Odin => format!("{dir}/{safe}.odin"),
         Language::Hare => format!("{dir}/{safe}.ha"),
     }
+}
+
+/// Relative binder path for a dependency on the current host language.
+pub fn expected_binder_rel(manifest: &Manifest, name: &str, consumer: Language) -> String {
+    default_out(manifest, name, consumer)
 }
 
 fn write_mod_rs(ctx: &AppCtx) -> Result<()> {
