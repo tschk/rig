@@ -530,7 +530,7 @@ fn v_host_cargo_facade_compiles_when_v_present() {
         .success()
         .stdout(predicate::str::contains("added"));
 
-    let binding = dir.path().join("src/rig_bindings/tiny_api.v");
+    let binding = dir.path().join("modules/tiny_api/tiny_api.v");
     assert!(binding.is_file(), "expected v binding");
     let text = std::fs::read_to_string(&binding).unwrap();
     assert!(
@@ -538,6 +538,8 @@ fn v_host_cargo_facade_compiles_when_v_present() {
         "{text}"
     );
     assert!(text.contains("#flag -l"), "{text}");
+    assert!(text.contains("pub fn abi_version()"), "{text}");
+    assert!(text.contains("pub fn add("), "{text}");
 
     let native = dir.path().join("target/rig/tiny_api");
     let has_lib = std::fs::read_dir(&native).unwrap().any(|e| {
@@ -547,27 +549,18 @@ fn v_host_cargo_facade_compiles_when_v_present() {
     });
     assert!(has_lib, "expected tiny_api_ffi cdylib");
 
-    // Single-file V smoke: #include header + fn C.… decls (both required on V 0.5).
     let abs_native = dir.path().join("target/rig/tiny_api");
-    let smoke = dir.path().join("smoke_call.v");
     let hdr = dir.path().join("src/rig_bindings/tiny_api_ffi.h");
     let hdr2 = abs_native.join("tiny_api_ffi.h");
     assert!(
         hdr.is_file() || hdr2.is_file(),
         "expected tiny_api_ffi.h beside bindings or native out"
     );
-    let include_dir = if hdr.is_file() {
-        dir.path().join("src/rig_bindings")
-    } else {
-        abs_native.clone()
-    };
+
+    let smoke = dir.path().join("smoke_call.v");
     std::fs::write(
         &smoke,
-        format!(
-            "#flag -L{nat}\n#flag -ltiny_api_ffi\n#flag -Wl,-rpath,{nat}\n#flag -I{inc}\n#include \"tiny_api_ffi.h\"\n\nfn C.tiny_api_abi_version() u32\n\nfn main() {{\n\tprintln(C.tiny_api_abi_version())\n}}\n",
-            nat = abs_native.display(),
-            inc = include_dir.display()
-        ),
+        "import tiny_api\n\nfn main() {\n\tprintln(tiny_api.abi_version())\n\tprintln(tiny_api.add(2, 3))\n}\n",
     )
     .unwrap();
     let out = std::process::Command::new("v")
@@ -580,6 +573,11 @@ fn v_host_cargo_facade_compiles_when_v_present() {
         "v compile failed:\nstdout:{}\nstderr:{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains('5') || stdout.contains("5\n") || stdout.trim().contains("5"),
+        "expected tiny_api.add(2, 3) => 5, stdout:{stdout}"
     );
 }
 
@@ -744,5 +742,116 @@ pub fn build(b: *std.Build) void {
     assert!(
         text.contains("flatlib_add"),
         "expected discovered C prototype in zig binder:\n{text}"
+    );
+}
+
+#[test]
+fn d_host_path_c_emits_header_externs() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("dub.json"), "{\"name\": \"demo\"}\n").unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/app.d"), "void main() {}\n").unwrap();
+
+    let vendor = dir.path().join("vendor/flatlib");
+    std::fs::create_dir_all(&vendor).unwrap();
+    std::fs::write(
+        vendor.join("flatlib.h"),
+        "#pragma once\nint flatlib_add(int a, int b);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        vendor.join("flatlib.c"),
+        "#include \"flatlib.h\"\nint flatlib_add(int a, int b) { return a + b; }\n",
+    )
+    .unwrap();
+
+    rig()
+        .current_dir(dir.path())
+        .args(["init"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("host: d"));
+
+    let path_spec = format!("path:{}", vendor.display());
+    rig()
+        .current_dir(dir.path())
+        .args(["add", "--c", &path_spec])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("added"));
+
+    let binding = dir.path().join("src/rig_bindings/flatlib.d");
+    assert!(binding.is_file(), "expected d path binding");
+    let text = std::fs::read_to_string(&binding).unwrap();
+    assert!(
+        text.contains("extern(C)"),
+        "expected extern(C) in d binder:\n{text}"
+    );
+    assert!(
+        text.contains("flatlib_add"),
+        "expected discovered C prototype in d binder:\n{text}"
+    );
+
+    let dmd = toolchain_ok("dmd");
+    let ldc = toolchain_ok("ldc2");
+    if !dmd && !ldc {
+        eprintln!("skip: dmd/ldc2 not on PATH (binder emission asserted)");
+        return;
+    }
+    let abs_native = dir.path().join("target/rig/flatlib");
+    let smoke = dir.path().join("smoke_call.d");
+    std::fs::write(
+        &smoke,
+        "import rig_bindings.flatlib;\nimport std.stdio;\nvoid main() { writeln(flatlib_add(2, 3)); }\n",
+    )
+    .unwrap();
+    let out_bin = dir.path().join("smoke_d");
+    let src_inc = dir.path().join("src");
+    let mut cmd = if ldc {
+        let mut c = std::process::Command::new("ldc2");
+        c.args([
+            format!("-of={}", out_bin.display()),
+            format!("-I{}", src_inc.display()),
+            format!("-L-L{}", abs_native.display()),
+            "-L-lflatlib_native".into(),
+            "-L-rpath".into(),
+            format!("-L{}", abs_native.display()),
+        ]);
+        c
+    } else {
+        let mut c = std::process::Command::new("dmd");
+        c.args([
+            format!("-of={}", out_bin.display()),
+            format!("-I{}", src_inc.display()),
+            format!("-L-L{}", abs_native.display()),
+            "-L-lflatlib_native".into(),
+        ]);
+        c
+    };
+    let compile = cmd
+        .arg(smoke.as_os_str())
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn d compiler");
+    assert!(
+        compile.status.success(),
+        "d compile failed:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = std::process::Command::new(&out_bin)
+        .current_dir(dir.path())
+        .output()
+        .expect("run d smoke");
+    assert!(
+        run.status.success(),
+        "d smoke failed:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains('5'),
+        "expected flatlib_add(2, 3) => 5, stdout:{stdout}"
     );
 }

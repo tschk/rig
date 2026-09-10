@@ -5,9 +5,13 @@
 //! 2. Plain `pub fn` / `pub const fn` with only FFI-safe scalar/pointer types
 //!    (wrapped as `{crate}_{fn}`).
 //!
-//! Honest skips: generics, traits/`impl` methods, `async`, tuples/arrays/refs,
-//! `String`/`str`/`Vec`, non-`repr(C)` structs, `f16`/`f128`, `Option<scalar>`
-//! (except pointer / `NonNull` / `NonZero*` niches, which are ABI-safe).
+//! Honest skips: generics, traits/`impl` methods, `async`, tuples/arrays,
+//! `&mut str` / `&mut [u8]` / `&[T]` (`T != u8`) / other refs, owned `String`/`Vec`,
+//! bare `str` as a return, non-`repr(C)` structs, `f16`/`f128`, `Option<scalar>`
+//! (non-niche), `dyn Trait`.
+//! Wrapped: `&str` / `&[u8]` (elided / `'a` / `'static` / `'_`) as (`*const u8`,
+//! `usize` len). Niches: `Option<*T>` / `Option<NonNull<_>>` / `NonNull` / `NonZero*`.
+//! `extern "C-unwind"` ≈ `extern "C"`. Frontiers: `docs/AUTOWRAP.md`.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -294,6 +298,11 @@ pub enum TypeAdapt {
     NonNull,
     /// `NonZero*` ↔ integer (zero in → zero/nullish out).
     NonZero,
+    /// `&str` ↔ (`*const u8`, `usize` len). This param is the pointer; the next
+    /// synthetic `{name}_len` param supplies the byte length (UTF-8).
+    StrSlice,
+    /// `&[u8]` ↔ (`*const u8`, `usize` len). Same pairing as [`TypeAdapt::StrSlice`].
+    ByteSlice,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -522,6 +531,49 @@ fn is_nonzero_name(t: &str) -> bool {
     base.starts_with("NonZero")
 }
 
+enum SharedBorrow {
+    Str,
+    Bytes,
+}
+
+/// Shared `&str` / `&[u8]` after space-stripping. Lifetimes may glue to the
+/// type (`&'a str` → `&'astr`). Any `mut` after `&` is rejected.
+fn parse_shared_str_or_bytes(ty_norm: &str) -> Option<SharedBorrow> {
+    let rest = ty_norm.strip_prefix('&')?;
+    if rest.starts_with("mut") {
+        return None;
+    }
+    if let Some(after_lt) = rest.strip_prefix('\'') {
+        if let Some(mid) = after_lt.strip_suffix("[u8]") {
+            if mid.is_empty() || mid.contains("mut") {
+                return None;
+            }
+            if mid.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return Some(SharedBorrow::Bytes);
+            }
+            return None;
+        }
+        if let Some(mid) = after_lt
+            .strip_suffix("str")
+            .filter(|_| !after_lt.contains('['))
+        {
+            if mid.is_empty() || mid.contains("mut") {
+                return None;
+            }
+            if mid.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return Some(SharedBorrow::Str);
+            }
+            return None;
+        }
+        return None;
+    }
+    match rest {
+        "str" => Some(SharedBorrow::Str),
+        "[u8]" => Some(SharedBorrow::Bytes),
+        _ => None,
+    }
+}
+
 fn split_params(params: &str) -> Option<Vec<Param>> {
     let params = params.trim();
     if params.is_empty() {
@@ -552,7 +604,6 @@ fn split_params(params: &str) -> Option<Vec<Param>> {
             // unnamed — synthesize
             (format!("arg{idx}"), part)
         };
-        let (ty, adapt) = parse_ffi_type_adapted(ty_raw)?;
         // Avoid C/Rust keyword collisions in generated headers
         let name = match name.as_str() {
             "type" | "in" | "out" | "string" | "mod" | "fn" | "let" | "pub" => {
@@ -560,6 +611,27 @@ fn split_params(params: &str) -> Option<Vec<Param>> {
             }
             _ => name,
         };
+        // Expand shared `&str` / `&[u8]` (any lifetime) into (ptr, len).
+        // `&mut str` / `&mut [u8]` / `&[T]` (T != u8) stay unfriendly skips.
+        let ty_norm = ty_raw.replace(' ', "");
+        if let Some(kind) = parse_shared_str_or_bytes(&ty_norm) {
+            let adapt = match kind {
+                SharedBorrow::Str => TypeAdapt::StrSlice,
+                SharedBorrow::Bytes => TypeAdapt::ByteSlice,
+            };
+            out.push(Param {
+                name: name.clone(),
+                ty: FfiType::ConstPtr(Box::new(FfiType::U8)),
+                adapt,
+            });
+            out.push(Param {
+                name: format!("{name}_len"),
+                ty: FfiType::Usize,
+                adapt: TypeAdapt::Identity,
+            });
+            continue;
+        }
+        let (ty, adapt) = parse_ffi_type_adapted(ty_raw)?;
         out.push(Param { name, ty, adapt });
     }
     Some(out)
@@ -597,25 +669,38 @@ pub fn scan_crate_sources(crate_root: &Path, package_name: &str) -> ScanReport {
         source_root: Some(crate_root.to_path_buf()),
         ..Default::default()
     };
-    let src = crate_root.join("src");
-    if !src.is_dir() {
-        return report;
-    }
     let safe = crate_ident(package_name);
     let mut seen = BTreeSet::new();
     let root_api = collect_root_api_names(crate_root);
-    let walker = walkdir::WalkDir::new(&src)
-        .into_iter()
-        .filter_map(|e| e.ok());
-    for ent in walker {
-        let path = ent.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
+    let src = crate_root.join("src");
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    if src.is_dir() {
+        roots.push(src);
+    } else {
+        // Crates with `[lib] path = "lib.rs"` (no `src/`) still expose a surface.
+        for cand in ["lib.rs", "main.rs"] {
+            let p = crate_root.join(cand);
+            if p.is_file()
+                && let Ok(text) = std::fs::read_to_string(&p)
+            {
+                scan_file_text(&text, &safe, &mut report, &mut seen);
+            }
         }
-        let Ok(text) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        scan_file_text(&text, &safe, &mut report, &mut seen);
+    }
+    for root in &roots {
+        let walker = walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok());
+        for ent in walker {
+            let path = ent.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            scan_file_text(&text, &safe, &mut report, &mut seen);
+        }
     }
     if !root_api.is_empty() {
         let before = report.exports.len();
@@ -656,8 +741,11 @@ fn collect_root_api_names(crate_root: &Path) -> BTreeSet<String> {
             }
         }
     }
-    // Also top-level pub fns in lib.rs
-    if let Ok(text) = std::fs::read_to_string(crate_root.join("src/lib.rs")) {
+    // Also top-level pub fns in lib.rs (src/ or crate-root layout).
+    for lib in [crate_root.join("src/lib.rs"), crate_root.join("lib.rs")] {
+        let Ok(text) = std::fs::read_to_string(&lib) else {
+            continue;
+        };
         for line in text.lines() {
             let t = line.trim();
             if (t.starts_with("pub fn")
@@ -899,7 +987,7 @@ fn classify_signature(
         });
     }
     if is_extern_c {
-        // extern C without no_mangle — still try under same name
+        // extern C without no_mangle — re-exported under the same name
         return Some(ExportFn {
             export_name: name.to_string(),
             rust_callee: Some(format!("{crate_safe}::{name}")),
@@ -1097,6 +1185,94 @@ mod tests {
     }
 
     #[test]
+    fn split_params_expands_str_and_byte_slices() {
+        let params = split_params("s: &str, b: &[u8], n: i32").unwrap();
+        assert_eq!(params.len(), 5);
+        assert_eq!(params[0].name, "s");
+        assert!(matches!(params[0].adapt, TypeAdapt::StrSlice));
+        assert_eq!(params[1].name, "s_len");
+        assert!(matches!(params[1].ty, FfiType::Usize));
+        assert_eq!(params[2].name, "b");
+        assert!(matches!(params[2].adapt, TypeAdapt::ByteSlice));
+        assert_eq!(params[3].name, "b_len");
+        assert_eq!(params[4].name, "n");
+        assert!(matches!(params[4].ty, FfiType::I32));
+    }
+
+    #[test]
+    fn scans_str_and_byte_slice_params() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "slice_api"
+version = "0.1.0"
+edition = "2021"
+[lib]
+path = "src/lib.rs"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            r#"
+pub fn greet_len(s: &str) -> usize { s.len() }
+pub fn bytes_len(b: &[u8]) -> usize { b.len() }
+"#,
+        )
+        .unwrap();
+        let report = scan_crate_sources(root, "slice_api");
+        let names: Vec<_> = report
+            .exports
+            .iter()
+            .map(|e| e.export_name.as_str())
+            .collect();
+        assert!(names.contains(&"slice_api_greet_len"), "{names:?}");
+        assert!(names.contains(&"slice_api_bytes_len"), "{names:?}");
+        let greet = report
+            .exports
+            .iter()
+            .find(|e| e.export_name == "slice_api_greet_len")
+            .unwrap();
+        assert_eq!(greet.params.len(), 2);
+        assert!(matches!(greet.params[0].adapt, TypeAdapt::StrSlice));
+    }
+
+    #[test]
+    fn scans_root_lib_rs_without_src_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "flat_api"
+version = "0.1.0"
+edition = "2021"
+[lib]
+path = "lib.rs"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("lib.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }
+",
+        )
+        .unwrap();
+        let report = scan_crate_sources(root, "flat_api");
+        assert!(
+            report
+                .exports
+                .iter()
+                .any(|e| e.export_name == "flat_api_add"),
+            "{:?}",
+            report.exports
+        );
+    }
+
+    #[test]
     fn scans_option_pointer_and_c_unwind() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -1162,7 +1338,9 @@ pub fn add(a: i32, b: i32) -> i32 { a + b }
 pub fn sqrt_f64(x: f64) -> f64 { x }
 pub async fn nope() {}
 pub fn generic<T>(x: T) -> T { x }
-pub fn bad(s: &str) -> usize { s.len() }
+pub fn greet(s: &str) -> usize { s.len() }
+pub fn digest(b: &[u8]) -> usize { b.len() }
+pub fn bad(s: *mut String) -> usize { 0 }
 pub fn tuple(x: f64) -> (f64, i32) { (x, 0) }
 
 #[no_mangle]
@@ -1186,11 +1364,31 @@ struct Foo;
         assert!(names.contains(&"simple_api_raw"), "{names:?}");
         assert!(!names.iter().any(|n| n.contains("nope")));
         assert!(!names.iter().any(|n| n.contains("generic")));
+        assert!(names.contains(&"simple_api_greet"), "{names:?}");
+        assert!(names.contains(&"simple_api_digest"), "{names:?}");
+        let greet = report
+            .exports
+            .iter()
+            .find(|e| e.export_name == "simple_api_greet")
+            .unwrap();
+        assert_eq!(greet.params.len(), 2);
+        assert!(matches!(greet.params[0].adapt, TypeAdapt::StrSlice));
+        assert!(matches!(greet.params[0].ty, FfiType::ConstPtr(_)));
+        assert_eq!(greet.params[1].name, "s_len");
+        assert!(matches!(greet.params[1].ty, FfiType::Usize));
+        let digest = report
+            .exports
+            .iter()
+            .find(|e| e.export_name == "simple_api_digest")
+            .unwrap();
+        assert_eq!(digest.params.len(), 2);
+        assert!(matches!(digest.params[0].adapt, TypeAdapt::ByteSlice));
+        assert_eq!(digest.params[1].name, "b_len");
         assert!(!names.iter().any(|n| n.contains("bad")));
         assert!(!names.iter().any(|n| n.contains("tuple")));
         assert!(!names.iter().any(|n| n.contains("method")));
         assert!(report.skipped_async >= 1);
         assert!(report.skipped_generics >= 1);
-        assert!(report.skipped_unfriendly >= 1);
+        assert!(report.skipped_unfriendly >= 2);
     }
 }
