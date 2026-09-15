@@ -29,10 +29,12 @@ pub fn is_within(root: &Path, candidate: &Path) -> bool {
     cand_n.starts_with(&root_n)
 }
 
-/// Join a relative path onto `root`. Absolute paths pass through unchanged.
+/// Join a relative path onto `root`. Absolute / rooted paths pass through
+/// unchanged (`is_absolute` is false on Windows for `/foo`, so also check
+/// `has_root`).
 /// Relative paths that would escape `root` via `..` are rejected.
 pub fn confine_relative(root: &Path, rel: &Path) -> Result<PathBuf> {
-    if rel.is_absolute() {
+    if rel.is_absolute() || rel.has_root() {
         return Ok(rel.to_path_buf());
     }
     let joined = root.join(rel);
