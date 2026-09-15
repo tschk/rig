@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Idempotent orb bootstrap for rig (Rust 1.88+, cargo lockfile).
+set -euo pipefail
+
+step() {
+  local label="$1"
+  shift
+  echo "==> ${label}"
+  local start
+  start="$(date +%s)"
+  "$@"
+  local end
+  end="$(date +%s)"
+  echo "    (${label}: $((end - start))s)"
+}
+
+need_apt=()
+for pkg in build-essential pkg-config cmake ninja-build curl ca-certificates; do
+  if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+    need_apt+=("$pkg")
+  fi
+done
+if ((${#need_apt[@]})); then
+  step "apt-get update" sudo apt-get update -qq
+  step "apt-get install ${need_apt[*]}" sudo apt-get install -y --no-install-recommends "${need_apt[@]}"
+else
+  echo "==> apt packages already present"
+fi
+
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+export PATH="$CARGO_HOME/bin:$PATH"
+
+if ! command -v rustup >/dev/null 2>&1; then
+  step "install rustup" bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal'
+fi
+# shellcheck disable=SC1091
+source "$CARGO_HOME/env"
+
+step "rustup toolchain stable" rustup toolchain install stable --profile minimal --no-self-update
+step "rustup default stable" rustup default stable
+step "rustup components" rustup component add rustfmt clippy --toolchain stable
+
+if [[ -f Cargo.lock ]]; then
+  step "cargo fetch" cargo fetch --locked
+else
+  step "cargo fetch" cargo fetch
+fi
+
+rustc --version
+cargo --version
+echo "==> setup complete"
