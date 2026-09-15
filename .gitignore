@@ -26,3 +26,6 @@ examples/c-host-sha2/main
 **/.rig-cmake-build/
 **/.rig-meson-build/
 **/.rig-nimcache/
+
+# Amp orb portals
+.amp/portals/
