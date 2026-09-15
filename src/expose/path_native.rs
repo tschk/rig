@@ -110,7 +110,7 @@ fn locate_or_fetch_path_git(
         let abs = if path.is_absolute() {
             path
         } else {
-            ctx.root.join(path)
+            crate::util::paths::confine_relative(&ctx.root, &path)?
         };
         return Ok(abs);
     }
@@ -125,6 +125,7 @@ fn locate_or_fetch_path_git(
                 dep.ecosystem
             )
         })?;
+    crate::resolve::git_path::validate_git_url(git)?;
 
     let cache = ctx
         .root
@@ -145,7 +146,7 @@ fn locate_or_fetch_path_git(
     }
     std::fs::create_dir_all(cache.parent().unwrap())?;
     let status = Command::new("git")
-        .args(["clone", "--depth", "1", git])
+        .args(["clone", "--depth", "1", "--", git])
         .arg(&cache)
         .status()
         .with_context(|| format!("spawn git clone for {git}"))?;
@@ -188,11 +189,7 @@ fn toolchain_on_path(bin: &str) -> bool {
 }
 
 fn which_exists(bin: &str) -> bool {
-    Command::new("sh")
-        .args(["-c", &format!("command -v {bin} >/dev/null 2>&1")])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::util::which(bin).is_some()
 }
 
 fn require_toolchain(bin: &str, eco: &str, name: &str) -> Result<()> {
@@ -945,6 +942,76 @@ mod tests {
         let dylib = shared_lib_path(&out, "demo_native");
         build_meson_shared(dir.path(), "demo", "demo_native", &dylib).unwrap();
         assert!(dylib.is_file(), "expected {}", dylib.display());
+    }
+
+    #[test]
+    fn relative_path_escape_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = crate::util::AppCtx {
+            root: dir.path().to_path_buf(),
+            manifest_path: dir.path().join("rig.toml"),
+            lock_path: dir.path().join("rig.lock"),
+            manifest: crate::manifest::Manifest::default(),
+            lock: crate::manifest::Lockfile::default(),
+            host: crate::detect::DetectedHost {
+                language: crate::detect::Language::C,
+                root: dir.path().to_path_buf(),
+                marker: None,
+            },
+            verbose: false,
+            dry_run: false,
+            yes: true,
+        };
+        let dep = crate::manifest::Dependency {
+            ecosystem: "c".into(),
+            version: Some("path".into()),
+            git: None,
+            rev: None,
+            path: Some("../outside".into()),
+            url: None,
+            features: None,
+            default_features: None,
+            expose: true,
+            expose_opts: None,
+        };
+        let err = locate_or_fetch_path_git(&ctx, "evil", &dep, None).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("escapes"), "{msg}");
+    }
+
+    #[test]
+    fn git_option_url_rejected_before_clone() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = crate::util::AppCtx {
+            root: dir.path().to_path_buf(),
+            manifest_path: dir.path().join("rig.toml"),
+            lock_path: dir.path().join("rig.lock"),
+            manifest: crate::manifest::Manifest::default(),
+            lock: crate::manifest::Lockfile::default(),
+            host: crate::detect::DetectedHost {
+                language: crate::detect::Language::C,
+                root: dir.path().to_path_buf(),
+                marker: None,
+            },
+            verbose: false,
+            dry_run: false,
+            yes: true,
+        };
+        let dep = crate::manifest::Dependency {
+            ecosystem: "c".into(),
+            version: Some("git".into()),
+            git: Some("-uorigin".into()),
+            rev: None,
+            path: None,
+            url: None,
+            features: None,
+            default_features: None,
+            expose: true,
+            expose_opts: None,
+        };
+        let err = locate_or_fetch_path_git(&ctx, "evil", &dep, None).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("git URL") || msg.contains("invalid"), "{msg}");
     }
 
     #[test]

@@ -22,6 +22,7 @@ pub struct PackageSpec {
 impl PackageSpec {
     pub fn parse(spec: &str) -> Result<Self> {
         if let Some(rest) = spec.strip_prefix("git+") {
+            git_path::validate_git_url(rest)?;
             let name = rest
                 .rsplit('/')
                 .next()
@@ -206,5 +207,7 @@ mod tests {
         let p = PackageSpec::parse("path:./vendor/libfoo").unwrap();
         assert_eq!(p.name, "libfoo");
         assert_eq!(p.path.as_deref(), Some("./vendor/libfoo"));
+        assert!(PackageSpec::parse("git+-uorigin").is_err());
+        assert!(PackageSpec::parse("git+file:///tmp/repo").is_err());
     }
 }

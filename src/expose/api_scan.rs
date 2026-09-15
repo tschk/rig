@@ -1086,6 +1086,12 @@ fn find_cargo_registry(name: &str, version: &str) -> Option<PathBuf> {
 }
 
 fn fetch_crates_io_crate(name: &str, version: &str, cache_dir: &Path) -> anyhow::Result<PathBuf> {
+    if !crate::util::paths::is_valid_crate_name(name) {
+        anyhow::bail!("invalid crate name `{name}`");
+    }
+    if !crate::util::paths::is_valid_crate_version(version) {
+        anyhow::bail!("invalid crate version `{version}`");
+    }
     let dest = cache_dir.join(format!("{name}-{version}"));
     if dest.join("Cargo.toml").is_file() {
         return Ok(dest);
@@ -1144,6 +1150,15 @@ pub fn try_cbindgen(crate_root: &Path, out_header: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fetch_rejects_path_injection_in_crate_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = fetch_crates_io_crate("../sha2", "0.10.9", dir.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("invalid crate name"));
+        let err = fetch_crates_io_crate("sha2", "../0.10.9", dir.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("invalid crate version"));
+    }
 
     #[test]
     fn parses_scalar_types() {

@@ -3,6 +3,31 @@
 use super::{PackageSpec, ResolvedPackage};
 use anyhow::{Result, bail};
 
+/// Reject git URLs that git would treat as options or unexpected schemes.
+pub fn validate_git_url(url: &str) -> Result<()> {
+    let url = url.trim();
+    if url.is_empty()
+        || url.starts_with('-')
+        || url.contains('\n')
+        || url.contains('\r')
+        || url.contains('\0')
+        || url.contains(' ')
+    {
+        bail!("invalid git URL");
+    }
+    let ok = url.starts_with("https://")
+        || url.starts_with("http://")
+        || url.starts_with("ssh://")
+        || url.starts_with("git://")
+        || url.starts_with("git@");
+    if !ok {
+        bail!(
+            "git URL must be https://, http://, ssh://, git://, or scp-like git@host:path (got `{url}`)"
+        );
+    }
+    Ok(())
+}
+
 /// If `spec` carries path or git, build a ResolvedPackage for `ecosystem`.
 pub fn resolve_path_or_git(
     ecosystem: &str,
@@ -92,5 +117,13 @@ mod tests {
             url: None,
         };
         assert!(resolve_path_git_only("odin", &spec, None, false).is_err());
+    }
+
+    #[test]
+    fn git_url_rejects_option_injection() {
+        assert!(validate_git_url("-uorigin").is_err());
+        assert!(validate_git_url("file:///etc/passwd").is_err());
+        assert!(validate_git_url("https://github.com/a/b.git").is_ok());
+        assert!(validate_git_url("git@github.com:a/b.git").is_ok());
     }
 }
