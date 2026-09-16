@@ -141,6 +141,7 @@ pub fn resolve(
         source: "nuget+https://api.nuget.org/v3/index.json".into(),
         checksum: None,
         git: None,
+        rev: None,
         path: None,
         url: None,
         features,

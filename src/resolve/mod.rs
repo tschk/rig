@@ -14,6 +14,8 @@ pub struct PackageSpec {
     pub name: String,
     pub version_req: Option<String>,
     pub git: Option<String>,
+    /// Optional git commit / tag / branch (from `#rev` or `--rev`).
+    pub rev: Option<String>,
     pub path: Option<String>,
     /// Direct package URL (used by Zig / URL pins).
     pub url: Option<String>,
@@ -22,7 +24,12 @@ pub struct PackageSpec {
 impl PackageSpec {
     pub fn parse(spec: &str) -> Result<Self> {
         if let Some(rest) = spec.strip_prefix("git+") {
-            let name = rest
+            let (url, rev) = split_git_rev(rest);
+            git_path::validate_git_url(url)?;
+            if let Some(r) = rev {
+                git_path::validate_git_rev(r)?;
+            }
+            let name = url
                 .rsplit('/')
                 .next()
                 .unwrap_or("dep")
@@ -31,7 +38,8 @@ impl PackageSpec {
             return Ok(Self {
                 name,
                 version_req: None,
-                git: Some(rest.to_string()),
+                git: Some(url.to_string()),
+                rev: rev.map(str::to_string),
                 path: None,
                 url: None,
             });
@@ -45,6 +53,7 @@ impl PackageSpec {
                 name,
                 version_req: None,
                 git: None,
+                rev: None,
                 path: Some(path.to_string()),
                 url: None,
             });
@@ -56,6 +65,7 @@ impl PackageSpec {
                 name,
                 version_req: None,
                 git: None,
+                rev: None,
                 path: None,
                 url: Some(url),
             });
@@ -65,6 +75,7 @@ impl PackageSpec {
                 name: name.to_string(),
                 version_req: Some(ver.to_string()),
                 git: None,
+                rev: None,
                 path: None,
                 url: None,
             });
@@ -73,9 +84,18 @@ impl PackageSpec {
             name: spec.to_string(),
             version_req: None,
             git: None,
+            rev: None,
             path: None,
             url: None,
         })
+    }
+}
+
+/// Split `url#rev` (Cargo-style git fragment).
+fn split_git_rev(spec: &str) -> (&str, Option<&str>) {
+    match spec.split_once('#') {
+        Some((url, rev)) if !rev.is_empty() => (url, Some(rev)),
+        _ => (spec, None),
     }
 }
 
@@ -118,6 +138,7 @@ pub struct ResolvedPackage {
     pub source: String,
     pub checksum: Option<String>,
     pub git: Option<String>,
+    pub rev: Option<String>,
     pub path: Option<String>,
     pub url: Option<String>,
     pub features: Option<Vec<String>>,
@@ -206,5 +227,11 @@ mod tests {
         let p = PackageSpec::parse("path:./vendor/libfoo").unwrap();
         assert_eq!(p.name, "libfoo");
         assert_eq!(p.path.as_deref(), Some("./vendor/libfoo"));
+        assert!(PackageSpec::parse("git+-uorigin").is_err());
+        assert!(PackageSpec::parse("git+file:///tmp/repo").is_err());
+        let pinned = PackageSpec::parse("git+https://github.com/a/b.git#deadbeef").unwrap();
+        assert_eq!(pinned.git.as_deref(), Some("https://github.com/a/b.git"));
+        assert_eq!(pinned.rev.as_deref(), Some("deadbeef"));
+        assert!(PackageSpec::parse("git+https://github.com/a/b.git#-bad").is_err());
     }
 }

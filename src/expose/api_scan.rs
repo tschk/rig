@@ -1052,6 +1052,7 @@ pub fn locate_or_fetch_sources(
     version: &str,
     path_hint: Option<&Path>,
     cache_dir: &Path,
+    expected_checksum: Option<&str>,
 ) -> Option<PathBuf> {
     if let Some(p) = path_hint
         && p.join("Cargo.toml").is_file()
@@ -1064,7 +1065,7 @@ pub fn locate_or_fetch_sources(
     if let Some(p) = find_cargo_registry(package_name, version) {
         return Some(p);
     }
-    fetch_crates_io_crate(package_name, version, cache_dir).ok()
+    fetch_crates_io_crate(package_name, version, cache_dir, expected_checksum).ok()
 }
 
 fn find_cargo_registry(name: &str, version: &str) -> Option<PathBuf> {
@@ -1085,7 +1086,18 @@ fn find_cargo_registry(name: &str, version: &str) -> Option<PathBuf> {
     None
 }
 
-fn fetch_crates_io_crate(name: &str, version: &str, cache_dir: &Path) -> anyhow::Result<PathBuf> {
+fn fetch_crates_io_crate(
+    name: &str,
+    version: &str,
+    cache_dir: &Path,
+    expected_checksum: Option<&str>,
+) -> anyhow::Result<PathBuf> {
+    if !crate::util::paths::is_valid_crate_name(name) {
+        anyhow::bail!("invalid crate name `{name}`");
+    }
+    if !crate::util::paths::is_valid_crate_version(version) {
+        anyhow::bail!("invalid crate version `{version}`");
+    }
     let dest = cache_dir.join(format!("{name}-{version}"));
     if dest.join("Cargo.toml").is_file() {
         return Ok(dest);
@@ -1098,6 +1110,12 @@ fn fetch_crates_io_crate(name: &str, version: &str, cache_dir: &Path) -> anyhow:
     let crate_path = cache_dir.join(format!("{name}-{version}.crate"));
     let mut file = std::fs::File::create(&crate_path)?;
     std::io::copy(&mut reader, &mut file)?;
+    drop(file);
+    let looked_up = expected_checksum
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| crate::resolve::cargo::checksum_for(name, version).ok());
+    verify_crate_checksum(&crate_path, looked_up.as_deref())?;
     // Prefer system tar (available on macOS/Linux).
     let status = std::process::Command::new("tar")
         .args([
@@ -1115,6 +1133,27 @@ fn fetch_crates_io_crate(name: &str, version: &str, cache_dir: &Path) -> anyhow:
         anyhow::bail!("extracted crate missing Cargo.toml at {}", dest.display());
     }
     Ok(dest)
+}
+
+fn sha256_hex_file(path: &Path) -> anyhow::Result<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path)?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+fn verify_crate_checksum(crate_path: &Path, expected: Option<&str>) -> anyhow::Result<()> {
+    let Some(expected) = expected.filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    let actual = sha256_hex_file(crate_path)?;
+    if actual.eq_ignore_ascii_case(expected) {
+        return Ok(());
+    }
+    let _ = std::fs::remove_file(crate_path);
+    anyhow::bail!(
+        "checksum mismatch for {} (expected {expected}, got {actual})",
+        crate_path.display()
+    )
 }
 
 /// Optional cbindgen: when `cbindgen` is on PATH and the crate has `cbindgen.toml`,
@@ -1144,6 +1183,36 @@ pub fn try_cbindgen(crate_root: &Path, out_header: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fetch_rejects_path_injection_in_crate_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = fetch_crates_io_crate("../sha2", "0.10.9", dir.path(), None).unwrap_err();
+        assert!(format!("{err:#}").contains("invalid crate name"));
+        let err = fetch_crates_io_crate("sha2", "../0.10.9", dir.path(), None).unwrap_err();
+        assert!(format!("{err:#}").contains("invalid crate version"));
+    }
+
+    #[test]
+    fn checksum_mismatch_rejects() {
+        let dir = tempfile::tempdir().unwrap();
+        let crate_path = dir.path().join("pkg-1.0.0.crate");
+        std::fs::write(&crate_path, b"not-a-real-crate").unwrap();
+        let err = verify_crate_checksum(&crate_path, Some("deadbeef")).unwrap_err();
+        assert!(format!("{err:#}").contains("checksum mismatch"));
+        assert!(!crate_path.exists(), "mismatched crate should be deleted");
+    }
+
+    #[test]
+    fn checksum_match_ok() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::tempdir().unwrap();
+        let crate_path = dir.path().join("pkg-1.0.0.crate");
+        std::fs::write(&crate_path, b"abc").unwrap();
+        let sum = hex::encode(Sha256::digest(b"abc"));
+        verify_crate_checksum(&crate_path, Some(&sum)).unwrap();
+        assert!(crate_path.exists());
+    }
 
     #[test]
     fn parses_scalar_types() {

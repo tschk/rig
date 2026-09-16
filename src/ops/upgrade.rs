@@ -89,6 +89,7 @@ pub fn run(args: &UpgradeArgs, g: &Globals) -> Result<u8> {
             host: None,
             features,
             no_default_features,
+            rev: None,
         };
         let code = add::run(&add_args, g)?;
         if code != 0 {

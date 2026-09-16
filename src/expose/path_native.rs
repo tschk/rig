@@ -110,7 +110,7 @@ fn locate_or_fetch_path_git(
         let abs = if path.is_absolute() {
             path
         } else {
-            ctx.root.join(path)
+            crate::util::paths::confine_relative(&ctx.root, &path)?
         };
         return Ok(abs);
     }
@@ -125,6 +125,14 @@ fn locate_or_fetch_path_git(
                 dep.ecosystem
             )
         })?;
+    crate::resolve::git_path::validate_git_url(git)?;
+    let rev = dep
+        .rev
+        .as_deref()
+        .or_else(|| resolved.and_then(|r| r.rev.as_deref()));
+    if let Some(rev) = rev {
+        crate::resolve::git_path::validate_git_rev(rev)?;
+    }
 
     let cache = ctx
         .root
@@ -132,21 +140,29 @@ fn locate_or_fetch_path_git(
         .join("git")
         .join(name);
     if cache.join(".git").is_dir() {
-        let _ = Command::new("git")
-            .args(["-C"])
-            .arg(&cache)
-            .arg("pull")
-            .arg("--ff-only")
-            .status();
+        if let Some(rev) = rev {
+            checkout_rev(&cache, rev)?;
+        } else {
+            let _ = Command::new("git")
+                .args(["-C"])
+                .arg(&cache)
+                .arg("pull")
+                .arg("--ff-only")
+                .status();
+        }
         return Ok(cache);
     }
     if cache.exists() {
         let _ = std::fs::remove_dir_all(&cache);
     }
     std::fs::create_dir_all(cache.parent().unwrap())?;
-    let status = Command::new("git")
-        .args(["clone", "--depth", "1", git])
-        .arg(&cache)
+    let mut clone = Command::new("git");
+    clone.args(["clone", "--depth", "1"]);
+    if let Some(rev) = rev.filter(|r| !looks_like_git_sha(r)) {
+        clone.args(["--branch", rev]);
+    }
+    clone.args(["--", git]).arg(&cache);
+    let status = clone
         .status()
         .with_context(|| format!("spawn git clone for {git}"))?;
     if !status.success() {
@@ -155,7 +171,52 @@ fn locate_or_fetch_path_git(
              Fix: ensure git is installed and the URL is reachable, or use path:… instead."
         );
     }
+    if let Some(rev) = rev {
+        checkout_rev(&cache, rev)?;
+    }
     Ok(cache)
+}
+
+fn looks_like_git_sha(rev: &str) -> bool {
+    (7..=40).contains(&rev.len()) && rev.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn checkout_rev(repo: &Path, rev: &str) -> Result<()> {
+    let status = Command::new("git")
+        .args(["-C"])
+        .arg(repo)
+        .args(["checkout", "--detach", "--", rev])
+        .status()
+        .with_context(|| format!("spawn git checkout {rev}"))?;
+    if status.success() {
+        return Ok(());
+    }
+    // Shallow clone of a SHA often needs fetch; try once.
+    let fetch = Command::new("git")
+        .args(["-C"])
+        .arg(repo)
+        .args(["fetch", "--depth", "1", "origin", rev])
+        .status()
+        .with_context(|| format!("spawn git fetch {rev}"))?;
+    if !fetch.success() {
+        bail!(
+            "git checkout `{rev}` failed in {} (status {status})",
+            repo.display()
+        );
+    }
+    let status = Command::new("git")
+        .args(["-C"])
+        .arg(repo)
+        .args(["checkout", "--detach", "FETCH_HEAD"])
+        .status()
+        .with_context(|| format!("spawn git checkout FETCH_HEAD for {rev}"))?;
+    if !status.success() {
+        bail!(
+            "git checkout `{rev}` failed in {} (status {status})",
+            repo.display()
+        );
+    }
+    Ok(())
 }
 
 fn shared_lib_path(dir: &Path, lib_name: &str) -> PathBuf {
@@ -188,11 +249,7 @@ fn toolchain_on_path(bin: &str) -> bool {
 }
 
 fn which_exists(bin: &str) -> bool {
-    Command::new("sh")
-        .args(["-c", &format!("command -v {bin} >/dev/null 2>&1")])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::util::which(bin).is_some()
 }
 
 fn require_toolchain(bin: &str, eco: &str, name: &str) -> Result<()> {
@@ -945,6 +1002,111 @@ mod tests {
         let dylib = shared_lib_path(&out, "demo_native");
         build_meson_shared(dir.path(), "demo", "demo_native", &dylib).unwrap();
         assert!(dylib.is_file(), "expected {}", dylib.display());
+    }
+
+    #[test]
+    fn relative_path_escape_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = crate::util::AppCtx {
+            root: dir.path().to_path_buf(),
+            manifest_path: dir.path().join("rig.toml"),
+            lock_path: dir.path().join("rig.lock"),
+            manifest: crate::manifest::Manifest::default(),
+            lock: crate::manifest::Lockfile::default(),
+            host: crate::detect::DetectedHost {
+                language: crate::detect::Language::C,
+                root: dir.path().to_path_buf(),
+                marker: None,
+            },
+            verbose: false,
+            dry_run: false,
+            yes: true,
+        };
+        let dep = crate::manifest::Dependency {
+            ecosystem: "c".into(),
+            version: Some("path".into()),
+            git: None,
+            rev: None,
+            path: Some("../outside".into()),
+            url: None,
+            features: None,
+            default_features: None,
+            expose: true,
+            expose_opts: None,
+        };
+        let err = locate_or_fetch_path_git(&ctx, "evil", &dep, None).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("escapes"), "{msg}");
+    }
+
+    #[test]
+    fn git_option_url_rejected_before_clone() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = crate::util::AppCtx {
+            root: dir.path().to_path_buf(),
+            manifest_path: dir.path().join("rig.toml"),
+            lock_path: dir.path().join("rig.lock"),
+            manifest: crate::manifest::Manifest::default(),
+            lock: crate::manifest::Lockfile::default(),
+            host: crate::detect::DetectedHost {
+                language: crate::detect::Language::C,
+                root: dir.path().to_path_buf(),
+                marker: None,
+            },
+            verbose: false,
+            dry_run: false,
+            yes: true,
+        };
+        let dep = crate::manifest::Dependency {
+            ecosystem: "c".into(),
+            version: Some("git".into()),
+            git: Some("-uorigin".into()),
+            rev: None,
+            path: None,
+            url: None,
+            features: None,
+            default_features: None,
+            expose: true,
+            expose_opts: None,
+        };
+        let err = locate_or_fetch_path_git(&ctx, "evil", &dep, None).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("git URL") || msg.contains("invalid"), "{msg}");
+    }
+
+    #[test]
+    fn git_rev_flag_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = crate::util::AppCtx {
+            root: dir.path().to_path_buf(),
+            manifest_path: dir.path().join("rig.toml"),
+            lock_path: dir.path().join("rig.lock"),
+            manifest: crate::manifest::Manifest::default(),
+            lock: crate::manifest::Lockfile::default(),
+            host: crate::detect::DetectedHost {
+                language: crate::detect::Language::C,
+                root: dir.path().to_path_buf(),
+                marker: None,
+            },
+            verbose: false,
+            dry_run: false,
+            yes: true,
+        };
+        let dep = crate::manifest::Dependency {
+            ecosystem: "c".into(),
+            version: Some("git".into()),
+            git: Some("https://github.com/a/b.git".into()),
+            rev: Some("-uorigin".into()),
+            path: None,
+            url: None,
+            features: None,
+            default_features: None,
+            expose: true,
+            expose_opts: None,
+        };
+        let err = locate_or_fetch_path_git(&ctx, "evil", &dep, None).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("rev") || msg.contains("invalid"), "{msg}");
     }
 
     #[test]

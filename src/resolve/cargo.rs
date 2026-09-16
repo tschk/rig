@@ -1,6 +1,7 @@
 use super::http::{agent, urlencoding_lite};
 use super::{PackageSpec, ResolvedPackage};
-use anyhow::{Context, Result};
+use crate::util::paths::{is_valid_crate_name, is_valid_crate_version};
+use anyhow::{Context, Result, bail};
 
 /// Resolve a cargo crate via crates.io API.
 pub fn resolve(
@@ -16,6 +17,7 @@ pub fn resolve(
             source: format!("path:{path}"),
             checksum: None,
             git: None,
+            rev: None,
             path: Some(path.clone()),
             url: None,
             features,
@@ -30,6 +32,7 @@ pub fn resolve(
             source: format!("git+{git}"),
             checksum: None,
             git: Some(git.clone()),
+            rev: spec.rev.clone(),
             path: None,
             url: None,
             features,
@@ -38,6 +41,9 @@ pub fn resolve(
     }
 
     let name = crate_name_for(spec);
+    if !is_valid_crate_name(&name) {
+        bail!("invalid crate name `{name}`");
+    }
 
     let mut resolved = fetch_crates_io(&name, spec.version_req.as_deref())?;
     resolved.features = features;
@@ -66,18 +72,18 @@ fn fetch_crates_io(name: &str, version_req: Option<&str>) -> Result<ResolvedPack
 
     let version = if let Some(req) = version_req {
         if req == "*" || req == "latest" {
-            max_version.clone()
+            select_best_stable(&json).unwrap_or(max_version.clone())
         } else if let Ok(wanted) =
             semver::Version::parse(req.trim_start_matches('=').trim_start_matches('v'))
         {
-            // exact or find matching
-            select_version(&json, &wanted.to_string()).unwrap_or(wanted.to_string())
+            select_version(&json, &wanted.to_string())
+                .ok_or_else(|| anyhow::anyhow!("crate `{name}` has no version {wanted}"))?
         } else {
-            // treat as requirement string — pick max_version if it matches loosely
-            select_req(&json, req).unwrap_or(max_version.clone())
+            select_req(&json, req)
+                .ok_or_else(|| anyhow::anyhow!("crate `{name}` has no version matching `{req}`"))?
         }
     } else {
-        max_version
+        select_best_stable(&json).unwrap_or(max_version)
     };
 
     let checksum = find_checksum(&json, &version);
@@ -89,6 +95,7 @@ fn fetch_crates_io(name: &str, version_req: Option<&str>) -> Result<ResolvedPack
         source: "registry+https://github.com/rust-lang/crates.io-index".into(),
         checksum,
         git: None,
+        rev: None,
         path: None,
         url: None,
         features: None,
@@ -99,11 +106,18 @@ fn fetch_crates_io(name: &str, version_req: Option<&str>) -> Result<ResolvedPack
 fn select_version(json: &serde_json::Value, exact: &str) -> Option<String> {
     let versions = json.get("versions")?.as_array()?;
     for v in versions {
+        if v.get("yanked").and_then(|y| y.as_bool()).unwrap_or(false) {
+            continue;
+        }
         if v.get("num")?.as_str()? == exact {
             return Some(exact.to_string());
         }
     }
     None
+}
+
+fn select_best_stable(json: &serde_json::Value) -> Option<String> {
+    select_req(json, "*")
 }
 
 fn select_req(json: &serde_json::Value, req: &str) -> Option<String> {
@@ -137,6 +151,7 @@ fn find_checksum(json: &serde_json::Value, version: &str) -> Option<String> {
 }
 
 pub fn search(query: &str, limit: usize) -> Result<Vec<(String, String, String)>> {
+    let limit = limit.clamp(1, 100);
     let url = format!(
         "https://crates.io/api/v1/crates?q={}&per_page={}",
         urlencoding_lite(query),
@@ -172,7 +187,67 @@ pub fn search(query: &str, limit: usize) -> Result<Vec<(String, String, String)>
     Ok(out)
 }
 
+pub fn checksum_for(name: &str, version: &str) -> Result<String> {
+    if !is_valid_crate_name(name) {
+        bail!("invalid crate name `{name}`");
+    }
+    if !is_valid_crate_version(version) {
+        bail!("invalid crate version `{version}`");
+    }
+    let url = format!("https://crates.io/api/v1/crates/{name}/{version}");
+    let resp = agent()
+        .get(&url)
+        .call()
+        .with_context(|| format!("GET {url}"))?;
+    let json: serde_json::Value = resp.into_json().context("decode crates.io version JSON")?;
+    json.get("version")
+        .and_then(|v| v.get("checksum"))
+        .and_then(|c| c.as_str())
+        .map(str::to_string)
+        .context("missing checksum on crates.io version")
+}
+
 pub fn latest_version(name: &str) -> Result<String> {
+    if !is_valid_crate_name(name) {
+        bail!("invalid crate name `{name}`");
+    }
     let r = fetch_crates_io(name, None)?;
     Ok(r.version)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn select_version_skips_yanked() {
+        let json = serde_json::json!({
+            "versions": [
+                {"num": "1.0.0", "yanked": true},
+                {"num": "0.9.0", "yanked": false}
+            ]
+        });
+        assert_eq!(select_version(&json, "1.0.0"), None);
+        assert_eq!(select_version(&json, "0.9.0").as_deref(), Some("0.9.0"));
+    }
+
+    #[test]
+    fn select_req_picks_highest_non_yanked() {
+        let json = serde_json::json!({
+            "versions": [
+                {"num": "2.0.0", "yanked": true},
+                {"num": "1.2.0", "yanked": false},
+                {"num": "1.0.0", "yanked": false}
+            ]
+        });
+        assert_eq!(select_req(&json, "^1").as_deref(), Some("1.2.0"));
+        assert_eq!(select_req(&json, "*").as_deref(), Some("1.2.0"));
+    }
+
+    #[test]
+    fn crate_name_validation() {
+        assert!(is_valid_crate_name("sha2"));
+        assert!(!is_valid_crate_name("../x"));
+        assert!(is_valid_crate_version("0.10.9"));
+    }
 }
