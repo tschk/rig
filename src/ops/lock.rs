@@ -15,6 +15,7 @@ pub fn run(_args: &LockArgs, g: &Globals) -> Result<u8> {
             name: name.clone(),
             version_req: dep.version.clone(),
             git: dep.git.clone(),
+            rev: dep.rev.clone(),
             path: dep.path.clone(),
             url: dep.url.clone(),
         };

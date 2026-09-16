@@ -236,7 +236,15 @@ path = "src/lib.rs"
                 ScanReport::default(),
             )
         }
-        _ => build_generic_surface(name, version, path_hint.as_deref(), &cache, &lib_name, &dir)?,
+        _ => build_generic_surface(
+            name,
+            version,
+            path_hint.as_deref(),
+            &cache,
+            &lib_name,
+            &dir,
+            resolved.and_then(|r| r.checksum.as_deref()),
+        )?,
     };
 
     std::fs::write(dir.join("src/lib.rs"), &lib_rs)?;
@@ -269,10 +277,11 @@ fn build_generic_surface(
     cache: &Path,
     lib_name: &str,
     dir: &Path,
+    expected_checksum: Option<&str>,
 ) -> Result<(String, String, Vec<ExportFn>, ScanReport)> {
     let mut scan = ScanReport::default();
     let mut wraps: Vec<ExportFn> = Vec::new();
-    if let Some(src) = locate_or_fetch_sources(name, version, path_hint, cache) {
+    if let Some(src) = locate_or_fetch_sources(name, version, path_hint, cache, expected_checksum) {
         scan = scan_crate_sources(&src, name);
         const MAX_AUTO: usize = 256;
         wraps = scan

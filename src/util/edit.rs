@@ -61,8 +61,8 @@ pub fn cargo_add_dep(
     if let Some(git) = git {
         let mut table = toml_edit::InlineTable::new();
         table.insert("git", git.into());
-        if version != "git" && version != "*" {
-            // optional: don't set version with git
+        if version != "git" && version != "*" && !version.is_empty() {
+            table.insert("rev", version.into());
         }
         if let Some(feats) = features {
             let mut arr = toml_edit::Array::new();

@@ -62,6 +62,7 @@ pub fn resolve(
             source: format!("zig+{url}"),
             checksum: None,
             git: None,
+            rev: None,
             path: None,
             url: Some(url.clone()),
             features,

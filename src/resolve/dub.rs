@@ -95,6 +95,7 @@ pub fn resolve(
         source: format!("dub+https://code.dlang.org/packages/{}", spec.name),
         checksum: None,
         git: None,
+        rev: None,
         path: None,
         url: None,
         features,

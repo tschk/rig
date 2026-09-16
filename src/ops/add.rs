@@ -25,7 +25,11 @@ pub fn run(args: &AddArgs, g: &Globals) -> Result<u8> {
     });
 
     for pkg in &args.packages {
-        let spec = PackageSpec::parse(pkg)?;
+        let mut spec = PackageSpec::parse(pkg)?;
+        if let Some(rev) = args.rev.as_deref() {
+            crate::resolve::git_path::validate_git_rev(rev)?;
+            spec.rev = Some(rev.to_string());
+        }
         let eco = resolve::infer_ecosystem(ctx.host.language, args.eco.language())?;
         let resolved = resolve::resolve(eco, &spec, features.clone(), args.no_default_features)?;
 
@@ -54,7 +58,7 @@ pub fn run(args: &AddArgs, g: &Globals) -> Result<u8> {
             ecosystem: resolved.ecosystem.clone(),
             version: Some(resolved.version.clone()),
             git: dep_git,
-            rev: None,
+            rev: resolved.rev.clone(),
             path: resolved.path.clone(),
             url: resolved.url.clone(),
             features: resolved.features.clone(),
@@ -81,7 +85,7 @@ pub fn run(args: &AddArgs, g: &Globals) -> Result<u8> {
                     None
                 };
                 let ver = if git.is_some() {
-                    "*".to_string()
+                    resolved.rev.clone().unwrap_or_else(|| "*".to_string())
                 } else {
                     resolved.version.clone()
                 };

@@ -16,4 +16,7 @@ pub struct AddArgs {
     /// Disable default features (cargo)
     #[arg(long)]
     pub no_default_features: bool,
+    /// Pin a git dependency to this commit / tag / branch
+    #[arg(long)]
+    pub rev: Option<String>,
 }

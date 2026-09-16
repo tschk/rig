@@ -158,6 +158,7 @@ pub fn resolve(
         source: format!("nimble+{}", found.url),
         checksum: None,
         git,
+        rev: None,
         path: None,
         url: None,
         features,

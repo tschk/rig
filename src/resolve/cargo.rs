@@ -1,6 +1,6 @@
 use super::http::{agent, urlencoding_lite};
 use super::{PackageSpec, ResolvedPackage};
-use crate::util::paths::is_valid_crate_name;
+use crate::util::paths::{is_valid_crate_name, is_valid_crate_version};
 use anyhow::{Context, Result, bail};
 
 /// Resolve a cargo crate via crates.io API.
@@ -17,6 +17,7 @@ pub fn resolve(
             source: format!("path:{path}"),
             checksum: None,
             git: None,
+            rev: None,
             path: Some(path.clone()),
             url: None,
             features,
@@ -31,6 +32,7 @@ pub fn resolve(
             source: format!("git+{git}"),
             checksum: None,
             git: Some(git.clone()),
+            rev: spec.rev.clone(),
             path: None,
             url: None,
             features,
@@ -93,6 +95,7 @@ fn fetch_crates_io(name: &str, version_req: Option<&str>) -> Result<ResolvedPack
         source: "registry+https://github.com/rust-lang/crates.io-index".into(),
         checksum,
         git: None,
+        rev: None,
         path: None,
         url: None,
         features: None,
@@ -184,6 +187,26 @@ pub fn search(query: &str, limit: usize) -> Result<Vec<(String, String, String)>
     Ok(out)
 }
 
+pub fn checksum_for(name: &str, version: &str) -> Result<String> {
+    if !is_valid_crate_name(name) {
+        bail!("invalid crate name `{name}`");
+    }
+    if !is_valid_crate_version(version) {
+        bail!("invalid crate version `{version}`");
+    }
+    let url = format!("https://crates.io/api/v1/crates/{name}/{version}");
+    let resp = agent()
+        .get(&url)
+        .call()
+        .with_context(|| format!("GET {url}"))?;
+    let json: serde_json::Value = resp.into_json().context("decode crates.io version JSON")?;
+    json.get("version")
+        .and_then(|v| v.get("checksum"))
+        .and_then(|c| c.as_str())
+        .map(str::to_string)
+        .context("missing checksum on crates.io version")
+}
+
 pub fn latest_version(name: &str) -> Result<String> {
     if !is_valid_crate_name(name) {
         bail!("invalid crate name `{name}`");
@@ -225,6 +248,6 @@ mod tests {
     fn crate_name_validation() {
         assert!(is_valid_crate_name("sha2"));
         assert!(!is_valid_crate_name("../x"));
-        assert!(crate::util::paths::is_valid_crate_version("0.10.9"));
+        assert!(is_valid_crate_version("0.10.9"));
     }
 }

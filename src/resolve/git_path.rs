@@ -28,6 +28,28 @@ pub fn validate_git_url(url: &str) -> Result<()> {
     Ok(())
 }
 
+/// Git rev / tag / branch: no whitespace, no leading `-`, no control chars.
+pub fn validate_git_rev(rev: &str) -> Result<()> {
+    let rev = rev.trim();
+    if rev.is_empty()
+        || rev.starts_with('-')
+        || rev.contains('\n')
+        || rev.contains('\r')
+        || rev.contains('\0')
+        || rev.contains(' ')
+        || rev.contains("..")
+    {
+        bail!("invalid git rev `{rev}`");
+    }
+    if !rev
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | '~' | '^'))
+    {
+        bail!("invalid git rev `{rev}`");
+    }
+    Ok(())
+}
+
 /// If `spec` carries path or git, build a ResolvedPackage for `ecosystem`.
 pub fn resolve_path_or_git(
     ecosystem: &str,
@@ -39,10 +61,15 @@ pub fn resolve_path_or_git(
         return Some(ResolvedPackage {
             name: spec.name.clone(),
             ecosystem: ecosystem.into(),
-            version: spec.version_req.clone().unwrap_or_else(|| "git".into()),
+            version: spec
+                .rev
+                .clone()
+                .or_else(|| spec.version_req.clone())
+                .unwrap_or_else(|| "git".into()),
             source: format!("git+{git}"),
             checksum: None,
             git: Some(git.clone()),
+            rev: spec.rev.clone(),
             path: None,
             url: None,
             features,
@@ -57,6 +84,7 @@ pub fn resolve_path_or_git(
             source: format!("path:{path}"),
             checksum: None,
             git: None,
+            rev: None,
             path: Some(path.clone()),
             url: None,
             features,
@@ -99,6 +127,7 @@ mod tests {
             name: "dep".into(),
             version_req: None,
             git: None,
+            rev: None,
             path: Some("./x".into()),
             url: None,
         };
@@ -113,6 +142,7 @@ mod tests {
             name: "foo".into(),
             version_req: None,
             git: None,
+            rev: None,
             path: None,
             url: None,
         };
@@ -125,5 +155,14 @@ mod tests {
         assert!(validate_git_url("file:///etc/passwd").is_err());
         assert!(validate_git_url("https://github.com/a/b.git").is_ok());
         assert!(validate_git_url("git@github.com:a/b.git").is_ok());
+    }
+
+    #[test]
+    fn git_rev_rejects_option_injection() {
+        assert!(validate_git_rev("-uorigin").is_err());
+        assert!(validate_git_rev("abc..def").is_err());
+        assert!(validate_git_rev("deadbeef").is_ok());
+        assert!(validate_git_rev("v1.2.3").is_ok());
+        assert!(validate_git_rev("refs/heads/main").is_ok());
     }
 }
