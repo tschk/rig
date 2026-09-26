@@ -21,6 +21,9 @@ examples/**/src/rig_bindings/
 examples/**/.rig/
 examples/**/main
 examples/c-host-sha2/main
+examples/ts-host-crc32fast/host
+examples/**/.scriptc/
+examples/**/*.ll
 
 # path/git build scratch
 **/.rig-cmake-build/

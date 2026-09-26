@@ -1,0 +1,7 @@
+{
+  "name": "ts-host-crc32fast",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "description": "rig example: TypeScript host calling a Rust crate through scriptc --ffi bindings"
+}

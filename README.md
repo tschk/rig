@@ -9,7 +9,7 @@ rig ui <pkg>
 rig dr
 ```
 
-Host projects consume native libs in-process; any cargo crate can be exposed into a non-Rust host.
+Host projects consume native libs in-process; any cargo crate can be exposed into a non-Rust host, and a TypeScript host builds with [scriptc](https://github.com/vercel-labs/scriptc) through equilibrium-ffi `--ffi` bindings.
 
 ## Install
 
@@ -31,7 +31,7 @@ Both install the `rig` binary.
 rig init
 ```
 
-Writes `rig.toml` + empty `rig.lock`. Detects host language from markers (`Cargo.toml`, `build.zig`, `*.nimble`, ...).
+Writes `rig.toml` + empty `rig.lock`. Detects host language from markers (`Cargo.toml`, `build.zig`, `*.nimble`, `tsconfig.json`, ...).
 
 ## ADD
 
@@ -54,7 +54,8 @@ Resolves the package, pins it in `rig.toml` / `rig.lock`, and auto-exposes a nat
 - V host <- cargo crate: builds the same facade and writes `modules/<pkg>/<pkg>.v` (`#flag` + `fn C.` decls + `pub fn` wrappers so a host can `import pkg` and call `pkg.add(...)`).
 - Odin host <- cargo crate: builds the same facade and writes `src/rig_bindings/<pkg>.odin` (`foreign import` + `foreign` block).
 - Hare host <- cargo crate: builds the same facade and writes `src/rig_bindings/<pkg>.ha` (`@symbol` C ABI decls + `-L/-l` hints).
-- C/C++/Zig/Nim/V/Odin/Hare/C#/D host <- path/git c|cpp|zig|nim|v|odin|hare: compiles into `target/rig/<pkg>/lib*_native.{dylib,so}` when feasible (flat sources, Makefile `$OUT`, CMake, meson, or language toolchain); clear error if the toolchain is missing. Simple C prototypes from discovered headers (and Zig `export fn` when the dep is Zig) are emitted into Nim/V/Zig/Odin/Hare/C#/D binders. Hare path/git is skipped with that error when `hare` is not on `PATH` (rig does not install a toolchain).
+- TypeScript host <- cargo crate: builds the same facade and writes `src/rig_bindings/<pkg>.ts` (`export declare function` decls) plus that dependency's `<pkg>.ffi.json`, merged into the host manifest `src/rig_bindings/rig.ffi.json` that scriptc builds with.
+- C/C++/Zig/Nim/V/Odin/Hare/C#/D/TypeScript host <- path/git c|cpp|zig|nim|v|odin|hare: compiles into `target/rig/<pkg>/lib*_native.{dylib,so}` when feasible (flat sources, Makefile `$OUT`, CMake, meson, or language toolchain); clear error if the toolchain is missing. Simple C prototypes from discovered headers (and Zig `export fn` when the dep is Zig) are emitted into Nim/V/Zig/Odin/Hare/C#/D binders; the TypeScript binder parses those headers into scriptc declarations. Hare path/git is skipped with that error when `hare` is not on `PATH` (rig does not install a toolchain).
 - Rust host <- foreign lang: generates an equilibrium-ffi `load` path stub.
 
 Ecosystem flags (mutually exclusive): `--cargo`/`--rust`, `--zig`, `--nim`, `--c`, `--cpp`, `--v`, `--d`, `--odin`, `--hare`, `--csharp`/`--cs`.
@@ -109,12 +110,32 @@ rig check --fix --full
 rig build
 ```
 
+`rig build` runs the host toolchain with the exposed surface wired in: `cargo build` for a Rust host, `zig build` for a Zig host, and for a TypeScript host it runs `scriptc build <entry>.ts --ffi <merged manifest>`, passing anything after `--` through:
+
+```bash
+rig build -- src/main.ts -o host   # scriptc: build src/main.ts into ./host
+```
+
+## TypeScript hosts (scriptc)
+
+```bash
+rig init                       # tsconfig.json / package.json -> host: typescript
+rig add --rust crc32fast       # any cargo crate, or --c/--zig/... for path/git
+rig build -- src/main.ts -o host
+./host
+```
+
+`rig add` writes one declaration module per dependency and merges every dependency's manifest into `src/rig_bindings/rig.ffi.json`, because scriptc takes a single `--ffi` manifest per build. Import the module and call the functions; rig has no npm resolver, so the ecosystem is always named (`--rust`, `--c`, …).
+
+scriptc's consumer classes are narrower than a C header — `f64`/`bool`/`u8`/`u32`/`i32`/`void` returns, the same scalar parameters, and length-delimited `const uint8_t *` + `size_t` spans (as `Uint8Array`) — so signatures outside that surface (pointer/struct returns, out-buffers, `i64`) are skipped with a warning naming the reason instead of being mistyped. Native libraries are recorded by absolute path, so the built host keeps running until the project moves; `rig sync` / `rig build` re-links it.
+
 ## Host demos
 
 - [`examples/zig-host-multi`](examples/zig-host-multi): Zig <- multiple cargo crates (`rx4` + `sha2`) via the generic facade.
 - [`examples/zig-host-rx4`](examples/zig-host-rx4): Zig <- `rx4` via a thin `rx4_ffi` facade + equilibrium-ffi.
 - [`examples/c-host-sha2`](examples/c-host-sha2): C <- `sha2` markers + `sha2_hash_256`/`sha2_hash_512` (`cc` + `-lsha2_ffi`).
 - [`examples/c-host-libm`](examples/c-host-libm): C <- auto-wrapped `libm` (`libm_sqrt`, ...) beyond markers.
+- [`examples/ts-host-crc32fast`](examples/ts-host-crc32fast): TypeScript <- `crc32fast` via scriptc `--ffi` bindings.
 
 ```bash
 cd examples/zig-host-multi
