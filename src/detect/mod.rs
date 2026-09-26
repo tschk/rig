@@ -16,6 +16,8 @@ pub enum Language {
     Odin,
     Hare,
     CSharp,
+    /// TypeScript/JavaScript host built with `scriptc` (vercel-labs scriptc).
+    TypeScript,
 }
 
 impl Language {
@@ -31,6 +33,7 @@ impl Language {
             Self::Odin => "odin",
             Self::Hare => "hare",
             Self::CSharp => "csharp",
+            Self::TypeScript => "typescript",
         }
     }
 
@@ -46,6 +49,10 @@ impl Language {
             Self::Odin => "odin",
             Self::Hare => "hare",
             Self::CSharp => "csharp",
+            // TypeScript hosts have no package ecosystem of their own in rig:
+            // they consume packages from the other ecosystems with `--rust`,
+            // `--zig`, `--c`, … and bind them through scriptc `--ffi`.
+            Self::TypeScript => "scriptc",
         }
     }
 
@@ -61,6 +68,7 @@ impl Language {
             "odin" => Self::Odin,
             "hare" => Self::Hare,
             "csharp" | "cs" | "c#" => Self::CSharp,
+            "typescript" | "ts" | "scriptc" | "javascript" | "js" => Self::TypeScript,
             other => bail!("unknown language: {other}"),
         })
     }
@@ -77,6 +85,7 @@ impl Language {
             Self::Odin,
             Self::Hare,
             Self::CSharp,
+            Self::TypeScript,
         ]
     }
 }
@@ -167,6 +176,7 @@ fn detect_markers(root: &Path) -> Option<(Language, PathBuf)> {
         ("v.mod", Language::V),
         ("ols.json", Language::Odin),
         ("nimble.paths", Language::Nim),
+        ("tsconfig.json", Language::TypeScript),
     ];
     for (name, lang) in checks {
         let p = root.join(name);
@@ -190,7 +200,8 @@ fn detect_markers(root: &Path) -> Option<(Language, PathBuf)> {
             }
         }
     }
-    // C / C++ via CMake/meson/Makefile + extension dominance
+    // A bare package.json is a weaker signal than a C/C++ build file, so it is
+    // only consulted after those below.
     let has_cmake = root.join("CMakeLists.txt").exists();
     let has_meson = root.join("meson.build").exists();
     let has_make = root.join("Makefile").exists() || root.join("makefile").exists();
@@ -221,6 +232,9 @@ fn detect_markers(root: &Path) -> Option<(Language, PathBuf)> {
             ));
         }
     }
+    if root.join("package.json").exists() {
+        return Some((Language::TypeScript, root.join("package.json")));
+    }
     None
 }
 
@@ -246,7 +260,7 @@ fn count_c_family(root: &Path) -> (usize, usize) {
 }
 
 fn census_extensions(root: &Path) -> Option<Language> {
-    let mut counts = [0usize; 10];
+    let mut counts = [0usize; 11];
     for ent in WalkDir::new(root)
         .max_depth(4)
         .into_iter()
@@ -267,6 +281,8 @@ fn census_extensions(root: &Path) -> Option<Language> {
             Some("odin") => 7,
             Some("ha") => 8,
             Some("cs") => 9,
+            Some("ts") | Some("mts") | Some("cts") | Some("tsx") | Some("js") | Some("mjs")
+            | Some("cjs") => 10,
             _ => continue,
         };
         counts[idx] += 1;

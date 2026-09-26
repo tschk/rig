@@ -160,6 +160,10 @@ pub fn resolve(
         Language::C | Language::Cpp | Language::V | Language::Odin | Language::Hare => {
             git_path::resolve_path_git_only(eco.ecosystem(), spec, features, no_default)
         }
+        Language::TypeScript => bail!(
+            "TypeScript hosts consume packages from another ecosystem — name it with \
+             --rust/--zig/--c/--cpp/--nim/--v/--d/--odin/--hare (rig has no npm resolver)"
+        ),
     }
 }
 
@@ -179,6 +183,10 @@ pub fn search(eco: Language, query: &str, limit: usize) -> Result<SearchOutcome>
         Language::C | Language::Cpp | Language::V | Language::Odin | Language::Hare => Ok(
             SearchOutcome::Unsupported(git_path::search_unsupported(eco.ecosystem())),
         ),
+        Language::TypeScript => Ok(SearchOutcome::Unsupported(
+            "scriptc has no package registry — search cargo (--rust) or name a git/path package"
+                .into(),
+        )),
     }
 }
 

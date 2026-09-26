@@ -73,6 +73,16 @@ fn guess_package_name(cwd: &std::path::Path, lang: Language) -> Result<String> {
             }
         }
     }
+    if lang == Language::TypeScript {
+        let package = cwd.join("package.json");
+        if package.is_file()
+            && let Ok(doc) =
+                serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(package)?)
+            && let Some(n) = doc.get("name").and_then(|n| n.as_str())
+        {
+            return Ok(n.to_string());
+        }
+    }
     Ok(cwd
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())

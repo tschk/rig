@@ -12,6 +12,7 @@ pub mod rust_host;
 pub mod shim;
 pub mod stamp;
 pub mod surface;
+pub mod ts_host;
 pub mod v_host;
 pub mod zig_export_scan;
 pub mod zig_host;
@@ -43,6 +44,7 @@ pub fn resync_all(ctx: &AppCtx) -> Result<Vec<ExposeResult>> {
         }
     }
     write_mod_rs(ctx)?;
+    ts_host::write_ts_manifest(ctx)?;
     stamp::write_stamp(ctx)?;
     Ok(outs)
 }
@@ -57,6 +59,7 @@ pub fn expose_resolved(
     }
     let r = expose_one(ctx, &resolved.name, dep, Some(resolved))?;
     write_mod_rs(ctx)?;
+    ts_host::write_ts_manifest(ctx)?;
     stamp::write_stamp(ctx)?;
     Ok(r)
 }
@@ -359,6 +362,34 @@ fn expose_one(
             rust_host::write_equilibrium_load_stub(&out_path, name, dep, eco)?;
             crate::util::edit::ensure_rust_mod_decl(&ctx.root)?;
         }
+        (Language::TypeScript, "cargo") => {
+            let built = native::build_cargo_cdylib(ctx, name, resolved, dep)?;
+            ts_host::write_ts_bindings(
+                &out_path,
+                name,
+                dep,
+                &built.artifacts.header,
+                &built.lib_path,
+                &ts_manifest_rel(ctx),
+            )?;
+            copy_header_beside(&out_path, &built.artifacts.header);
+        }
+        (Language::TypeScript, eco)
+            if matches!(eco, "c" | "cpp" | "zig" | "nim" | "v" | "odin" | "hare") =>
+        {
+            match path_native::build_path_git_lib(ctx, name, dep, resolved) {
+                Ok(built) => ts_host::write_ts_path_native(
+                    &out_path,
+                    name,
+                    dep,
+                    &built,
+                    &ts_manifest_rel(ctx),
+                )?,
+                Err(err) => {
+                    bail!("path/git expose build failed for `{name}` ({eco}): {err}");
+                }
+            }
+        }
         (Language::Nim, eco) if eco != "cargo" => {
             nim_host::write_nim_path_git_stub(&out_path, name, dep)?;
         }
@@ -404,7 +435,14 @@ fn default_out(manifest: &Manifest, name: &str, consumer: Language) -> String {
         Language::D => format!("{dir}/{safe}.d"),
         Language::Odin => format!("{dir}/{safe}.odin"),
         Language::Hare => format!("{dir}/{safe}.ha"),
+        Language::TypeScript => format!("{dir}/{safe}.ts"),
     }
+}
+
+/// Host-root-relative path of the merged scriptc manifest, as it appears in a
+/// generated declaration module's build hint.
+fn ts_manifest_rel(ctx: &AppCtx) -> String {
+    format!("{}/{}", ctx.manifest.expose.dir, ts_host::HOST_MANIFEST)
 }
 
 /// Relative binder path for a dependency on the current host language.
@@ -445,7 +483,7 @@ fn write_mod_rs(ctx: &AppCtx) -> Result<()> {
 pub fn remove_expose_artifacts(ctx: &AppCtx, name: &str) -> Result<()> {
     let safe = name.replace('-', "_");
     let dir = ctx.root.join(&ctx.manifest.expose.dir);
-    for ext in ["rs", "zig", "nim", "h", "cs", "v", "d", "odin", "ha"] {
+    for ext in ["rs", "zig", "nim", "h", "cs", "v", "d", "odin", "ha", "ts"] {
         let p = dir.join(format!("{safe}.{ext}"));
         if p.exists() {
             let _ = std::fs::remove_file(&p);
@@ -454,6 +492,10 @@ pub fn remove_expose_artifacts(ctx: &AppCtx, name: &str) -> Result<()> {
         if p2.exists() {
             let _ = std::fs::remove_file(&p2);
         }
+    }
+    let own_manifest = dir.join(format!("{safe}.ffi.json"));
+    if own_manifest.exists() {
+        let _ = std::fs::remove_file(&own_manifest);
     }
     let shim = shim::shim_dir(ctx, name);
     if shim.exists() {
@@ -464,6 +506,7 @@ pub fn remove_expose_artifacts(ctx: &AppCtx, name: &str) -> Result<()> {
         let _ = std::fs::remove_dir_all(&native);
     }
     write_mod_rs(ctx)?;
+    ts_host::write_ts_manifest(ctx)?;
     stamp::write_stamp(ctx)?;
     Ok(())
 }

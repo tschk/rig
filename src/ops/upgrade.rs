@@ -119,6 +119,9 @@ fn eco_from_lang(lang: Language) -> EcosystemArgs {
         Language::Odin => eco.odin = true,
         Language::Hare => eco.hare = true,
         Language::CSharp => eco.csharp = true,
+        // TypeScript hosts take packages from another ecosystem; the caller
+        // names it explicitly.
+        Language::TypeScript => {}
     }
     eco
 }
