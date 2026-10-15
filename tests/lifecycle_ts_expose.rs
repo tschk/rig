@@ -97,7 +97,10 @@ fn add_sync_remove_on_typescript_host() {
     assert!(names.contains(&"cmath_double"), "{names:?}");
     assert!(!names.contains(&"cmath_name"), "{names:?}");
     assert_eq!(merged["libraries"].as_array().unwrap().len(), 2);
-    assert!(merged["libraries"][0].as_str().unwrap().starts_with('/'));
+    // Manifest library paths are absolute so scriptc resolves them from the
+    // manifest's directory; check absoluteness portably (`C:\...` on Windows).
+    let library = merged["libraries"][0].as_str().unwrap();
+    assert!(Path::new(library).is_absolute(), "{library}");
 
     // sync is idempotent
     rig()
