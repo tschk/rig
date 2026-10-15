@@ -266,7 +266,17 @@ mod tests {
         assert!(text.contains("--ffi src/rig_bindings/rig.ffi.json"));
         let manifest = std::fs::read_to_string(dir.path().join("demo.ffi.json")).unwrap();
         assert!(manifest.contains("\"symbol\": \"demo_add\""));
-        assert!(manifest.contains(&library.display().to_string()));
+        // JSON-escapes the path (backslashes on Windows), so assert on the
+        // parsed value rather than the raw manifest text.
+        let parsed: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+        let libraries: Vec<&str> = parsed["libraries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        let library_path = library.display().to_string();
+        assert!(libraries.contains(&library_path.as_str()));
     }
 
     #[test]
