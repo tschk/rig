@@ -8,6 +8,16 @@ fn rig() -> Command {
     Command::cargo_bin("rig").unwrap()
 }
 
+/// Windows has no rpath: the loader finds DLLs via `PATH` (or the exe dir).
+fn with_dll_dir(cmd: &mut std::process::Command, dir: &Path) {
+    if cfg!(windows) {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let mut dirs = vec![dir.to_path_buf()];
+        dirs.extend(std::env::split_paths(&path));
+        cmd.env("PATH", std::env::join_paths(dirs).unwrap());
+    }
+}
+
 fn have(bin: &str) -> bool {
     std::process::Command::new(bin)
         .arg("--version")
@@ -78,11 +88,10 @@ fn rust_host_path_c_dep_links_and_calls_native_code() {
         "{binding}"
     );
 
-    let run = std::process::Command::new("cargo")
-        .args(["run", "-q", "-j2"])
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let mut run = std::process::Command::new("cargo");
+    run.args(["run", "-q", "-j2"]).current_dir(root);
+    with_dll_dir(&mut run, &root.join("target/rig/flatlib"));
+    let run = run.output().unwrap();
     assert!(
         run.status.success(),
         "host build/run failed:\n{}",
@@ -289,7 +298,9 @@ fn facade_turns_a_panic_into_a_fallback_value_instead_of_aborting() {
         "{}",
         String::from_utf8_lossy(&cc.stderr)
     );
-    let run = std::process::Command::new(&exe).output().unwrap();
+    let mut run = std::process::Command::new(&exe);
+    with_dll_dir(&mut run, &native);
+    let run = run.output().unwrap();
     assert!(
         run.status.success(),
         "panic crossed the C boundary (status {:?}):\n{}",
