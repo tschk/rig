@@ -19,10 +19,11 @@ pub fn run(args: &RemoveArgs, g: &Globals) -> Result<u8> {
             println!("would remove {name}");
             continue;
         }
-        ctx.manifest.dependencies.remove(name);
+        let removed = ctx.manifest.dependencies.remove(name);
         ctx.lock.remove(name);
         let _ = edit::cargo_remove_dep(&ctx.root.join("Cargo.toml"), name);
-        expose::remove_expose_artifacts(&ctx, name)?;
+        let eco = removed.map(|d| d.ecosystem).unwrap_or_default();
+        expose::remove_expose_artifacts(&ctx, name, &eco)?;
         println!("removed {name}");
     }
     if !g.dry_run {

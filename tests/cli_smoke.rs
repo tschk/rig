@@ -97,6 +97,10 @@ fn search_path_git_ecosystem_is_honest() {
 
 #[test]
 fn add_path_non_cargo_updates_manifest() {
+    if !toolchain_ok("cc") {
+        eprintln!("skip: cc missing (rig builds the C path dep)");
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("Cargo.toml"),
@@ -107,6 +111,11 @@ fn add_path_non_cargo_updates_manifest() {
     std::fs::write(dir.path().join("src/lib.rs"), "").unwrap();
     let vendor = dir.path().join("vendor/mylib");
     std::fs::create_dir_all(&vendor).unwrap();
+    std::fs::write(
+        vendor.join("mylib.c"),
+        "int mylib_one(void) { return 1; }\n",
+    )
+    .unwrap();
 
     rig()
         .current_dir(dir.path())

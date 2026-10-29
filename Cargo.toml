@@ -25,8 +25,11 @@ path = "src/main.rs"
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 toml = "0.8"
+syn = { version = "2", default-features = false, features = ["full", "parsing", "printing", "clone-impls"] }
+quote = { version = "1", default-features = false }
+proc-macro2 = { version = "1", default-features = false }
 toml_edit = "0.22"
 thiserror = "2"
 ureq = { version = "2", features = ["json"] }

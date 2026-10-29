@@ -162,7 +162,7 @@ Reasons:
 ### Escape hatches
 
 - Hand enrichment in `shim.rs` for known crates (existing pattern).
-- Rust host ← foreign: equilibrium-ffi `load` stubs (`rust_host.rs`).
+- Rust host ← path/git native libs: `#[link]` + `extern "C"` binders and a `build.rs` link block (`rust_host.rs`, `util/edit.rs`).
 - Expose a **narrow C vtable struct** the crate authors maintain (`repr(C)`
   function pointers) — rig can re-export those as UpstreamExternC when
   `#[no_mangle] extern "C"` exists; it must not invent the vtable.

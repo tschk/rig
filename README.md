@@ -56,7 +56,10 @@ Resolves the package, pins it in `rig.toml` / `rig.lock`, and auto-exposes a nat
 - Hare host <- cargo crate: builds the same facade and writes `src/rig_bindings/<pkg>.ha` (`@symbol` C ABI decls + `-L/-l` hints).
 - TypeScript host <- cargo crate: builds the same facade and writes `src/rig_bindings/<pkg>.ts` (`export declare function` decls) plus that dependency's `<pkg>.ffi.json`, merged into the host manifest `src/rig_bindings/rig.ffi.json` that scriptc builds with.
 - C/C++/Zig/Nim/V/Odin/Hare/C#/D/TypeScript host <- path/git c|cpp|zig|nim|v|odin|hare: compiles into `target/rig/<pkg>/lib*_native.{dylib,so}` when feasible (flat sources, Makefile `$OUT`, CMake, meson, or language toolchain); clear error if the toolchain is missing. Simple C prototypes from discovered headers (and Zig `export fn` when the dep is Zig) are emitted into Nim/V/Zig/Odin/Hare/C#/D binders; the TypeScript binder parses those headers into scriptc declarations. Hare path/git is skipped with that error when `hare` is not on `PATH` (rig does not install a toolchain).
-- Rust host <- foreign lang: generates an equilibrium-ffi `load` path stub.
+- Rust host <- path/git c|cpp|zig|nim|v|odin|hare: builds the same `lib*_native` shared library, writes `src/rig_bindings/<pkg>.rs` (`#[link]` + `extern "C"` declarations from discovered C prototypes / Zig `export fn`s), and adds a per-package `rig-link` block to `build.rs` (link search path + rpath; created if missing).
+- C# host <- NuGet package (`--csharp`): adds a `<PackageReference>` to rig's `<ItemGroup Label="rig">` in the host `.csproj` (`path:` pins become `<ProjectReference>`); `dotnet restore` fetches it.
+- D host <- dub package (`--d`): adds it to `dependencies` in `dub.json` / `dub.sdl` (`path:` pins become dub path dependencies); `dub` fetches it.
+- Anything else (e.g. a d or csharp package into a Rust/C/Nim host, or git-pinned NuGet/dub packages) fails with an error instead of writing a placeholder: there is no C ABI build for those packages.
 
 Ecosystem flags (mutually exclusive): `--cargo`/`--rust`, `--zig`, `--nim`, `--c`, `--cpp`, `--v`, `--d`, `--odin`, `--hare`, `--csharp`/`--cs`.
 
@@ -152,6 +155,7 @@ For every `rig add --rust <crate>` on a Zig (or other non-Rust) host, rig genera
 | `{crate}_abi_version` | Facade ABI revision (`u32`) |
 | `{crate}_version` | Null-terminated version string |
 | `{crate}_name` | Null-terminated crate name |
+| `{crate}_last_panic` | Panic message from this thread's last wrapped call, or null |
 
 Known enrichments (today: `rx4`, `sha2`, `crc32fast`, `md-5`, `hex`, `base64`) may export additional methods beyond the markers (e.g. `rx4_prompt_smoke`, `sha2_hash_256`, `hex_encode`, `base64_encode`).
 
@@ -171,6 +175,8 @@ For other crates, rig auto-wraps a scanned public surface when sources are avail
 - Crates with `#![forbid(unsafe_code)]` still work: unsafe lives only in the generated facade.
 - Auto-wrap caps at 256 symbols per crate; enrichments remain intentional for trait-heavy APIs (e.g. `sha2_hash_256`).
 - Rust hosts keep the native Cargo re-export path (`src/rig_bindings/<pkg>.rs`); the cdylib facade is for cross-language hosts.
+- Panics: every generated wrapper (auto-wraps and enrichments) runs inside `catch_unwind`; a panic returns the same zero/null value used for rejected inputs (`-127` for the status-code enrichment helpers) instead of aborting the host, and `{crate}_last_panic()` then returns the panic message (null when the thread's last wrapped call did not panic) so callers can tell the two apart. Upstream `#[no_mangle]` functions are linked through unchanged, so their own panic behaviour applies.
+- The surface scan parses sources with `syn` and follows the module tree from the lib entry: it wraps free `pub fn`s reachable through `pub mod` chains (exported as `{crate}_{mod}_{fn}`) or root `pub use` re-exports, and skips `#[cfg]`-gated items, macro-generated items, and `extern` import blocks.
 
 ## Manifest
 
