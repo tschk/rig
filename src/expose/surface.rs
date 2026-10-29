@@ -190,14 +190,9 @@ pub fn emit_rust_wrappers(exports: &[ExportFn]) -> String {
         if matches!(e.kind, ExportKind::Marker | ExportKind::Enrichment) {
             continue;
         }
-        // Upstream `#[no_mangle] extern "C"` items already exist in the linked
-        // surface; redefining them here would shadow the callee and self-recurse.
-        if e.kind == ExportKind::UpstreamExternC
-            && e.rust_callee
-                .as_deref()
-                .and_then(|c| c.rsplit("::").next())
-                .is_some_and(|callee| callee == e.export_name)
-        {
+        // Upstream `#[no_mangle]` / `#[export_name]` items are already exported
+        // by the linked crate; redefining the symbol here would clash.
+        if e.kind == ExportKind::UpstreamExternC {
             continue;
         }
         let Some(callee) = e.rust_callee.as_deref() else {
@@ -293,8 +288,16 @@ pub fn emit_rust_wrappers(exports: &[ExportFn]) -> String {
         } else {
             format!(" -> {ret}")
         };
+        // A panic must not unwind across `extern "C"`: `rig_guard` (defined in
+        // every façade) catches it and returns the same zero/null value used for
+        // rejected inputs.
+        let fallback = if early.is_empty() {
+            "()"
+        } else {
+            early.as_str()
+        };
         out.push_str(&format!(
-            "\n#[no_mangle]\npub {unsafe_kw}extern \"C\" fn {}({params_sig}){ret_arrow} {{\n    {body}\n}}\n",
+            "\n#[no_mangle]\npub {unsafe_kw}extern \"C\" fn {}({params_sig}){ret_arrow} {{\n    rig_guard({fallback}, move || {{\n    {body}\n    }})\n}}\n",
             e.export_name
         ));
     }

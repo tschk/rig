@@ -110,11 +110,20 @@ fn lib_name_from_cargo(cargo_toml: &Path, fallback: &str) -> String {
     crate_ident(fallback)
 }
 
-fn resolve_dep_path(resolved: Option<&ResolvedPackage>, dep: &Dependency) -> Option<PathBuf> {
+/// `path:` pins are relative to the project root, not the shim or the cwd.
+fn dep_path(root: &Path, resolved: Option<&ResolvedPackage>, dep: &Dependency) -> Option<PathBuf> {
     let path = resolved
         .and_then(|r| r.path.as_deref())
         .or(dep.path.as_deref())?;
-    let pb = PathBuf::from(path);
+    Some(root.join(path))
+}
+
+fn resolve_dep_path(
+    root: &Path,
+    resolved: Option<&ResolvedPackage>,
+    dep: &Dependency,
+) -> Option<PathBuf> {
+    let pb = dep_path(root, resolved, dep)?;
     if pb.join("Cargo.toml").is_file() {
         Some(pb)
     } else {
@@ -133,7 +142,7 @@ pub fn ensure_shim(
     std::fs::create_dir_all(&out_dir)?;
 
     // Passthrough: upstream already ships a cdylib — build it directly.
-    if let Some(path) = resolve_dep_path(resolved, dep) {
+    if let Some(path) = resolve_dep_path(&ctx.root, resolved, dep) {
         let manifest = path.join("Cargo.toml");
         if crate_has_cdylib(&manifest) {
             let lib_name = lib_name_from_cargo(&manifest, name);
@@ -166,7 +175,7 @@ pub fn ensure_shim(
         .or(dep.version.as_deref())
         .unwrap_or("*");
 
-    let dep_toml = cargo_dep_line(name, resolved, dep)?;
+    let dep_toml = cargo_dep_line(&ctx.root, name, resolved, dep)?;
     let cargo_toml = format!(
         r#"[package]
 name = "{lib_name}"
@@ -187,7 +196,7 @@ path = "src/lib.rs"
     );
     std::fs::write(dir.join("Cargo.toml"), cargo_toml)?;
 
-    let path_hint = resolve_dep_path(resolved, dep);
+    let path_hint = resolve_dep_path(&ctx.root, resolved, dep);
     let cache = ctx.root.join(&ctx.manifest.expose.cache).join("crates");
 
     let (lib_rs, header, exports, scan) = match name {
@@ -381,6 +390,15 @@ fn marker_exports(name: &str, _version: &str) -> Vec<ExportFn> {
             kind: ExportKind::Marker,
             is_unsafe: false,
         },
+        ExportFn {
+            export_name: format!("{safe}_last_panic"),
+            rust_callee: None,
+            params: vec![],
+            ret: FfiType::ConstCChar,
+            ret_adapt: Default::default(),
+            kind: ExportKind::Marker,
+            is_unsafe: false,
+        },
     ]
 }
 
@@ -518,7 +536,9 @@ fn write_passthrough_header(
     name: &str,
     lib_name: &str,
 ) -> Result<(PathBuf, Vec<ExportFn>)> {
-    let exports = marker_exports(name, "");
+    // Upstream cdylibs are linked as-is: no rig façade, so no `_last_panic`.
+    let mut exports = marker_exports(name, "");
+    exports.retain(|e| !e.export_name.ends_with("_last_panic"));
     let header = header_from_exports(name, lib_name, &exports, Some("passthrough markers only"));
     let path = out_dir.join(format!("{}_rig_discover.h", crate_ident(name)));
     std::fs::write(
@@ -534,19 +554,17 @@ fn write_passthrough_header(
 }
 
 fn cargo_dep_line(
+    root: &Path,
     name: &str,
     resolved: Option<&ResolvedPackage>,
     dep: &Dependency,
 ) -> Result<String> {
     let crate_name = name;
 
-    if let Some(path) = resolved
-        .and_then(|r| r.path.as_deref())
-        .or(dep.path.as_deref())
-    {
+    if let Some(path) = dep_path(root, resolved, dep) {
         return Ok(format!(
             "{crate_name} = {{ path = \"{}\", default-features = false }}",
-            escape_toml_str(path)
+            escape_toml_str(&path.display().to_string())
         ));
     }
     if let Some(git) = resolved
@@ -572,11 +590,55 @@ fn cargo_dep_line(
     ))
 }
 
+/// Façade source for panic containment, emitted into every generated
+/// `lib.rs`. A panic in wrapped Rust code yields `fallback` (0 / null, or -127
+/// for the status-code helpers) instead of unwinding into, or aborting, the
+/// foreign caller; `{prefix}_last_panic()` tells the caller it happened.
+fn rig_guard_src(prefix: &str) -> String {
+    format!(
+        r#"
+thread_local! {{
+    static RIG_LAST_PANIC: std::cell::RefCell<Option<std::ffi::CString>> =
+        const {{ std::cell::RefCell::new(None) }};
+}}
+
+/// Contain panics at the C ABI boundary: a panic yields `fallback` instead of
+/// unwinding into (or aborting) the foreign caller, and is recorded for
+/// `{prefix}_last_panic`.
+#[allow(dead_code)]
+fn rig_guard<R>(fallback: R, f: impl FnOnce() -> R) -> R {{
+    RIG_LAST_PANIC.with(|p| p.borrow_mut().take());
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {{
+        Ok(value) => value,
+        Err(payload) => {{
+            let msg = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "panic".to_string());
+            let msg = std::ffi::CString::new(msg.replace('\0', " ")).unwrap_or_default();
+            RIG_LAST_PANIC.with(|p| *p.borrow_mut() = Some(msg));
+            fallback
+        }}
+    }}
+}}
+
+/// Panic message from this thread's most recent call into a wrapped function,
+/// or null if that call did not panic. Valid until the next such call.
+#[no_mangle]
+pub extern "C" fn {prefix}_last_panic() -> *const c_char {{
+    RIG_LAST_PANIC.with(|p| p.borrow().as_ref().map_or(std::ptr::null(), |m| m.as_ptr()))
+}}
+"#
+    )
+}
+
 fn escape_toml_str(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn sha2_lib_rs(version: &str) -> String {
+    let guard = rig_guard_src("sha2");
     format!(
         r#"//! rig-generated C ABI façade for `sha2` (markers + SHA-256/512 helpers).
 //! Domain helpers are known enrichments — not a full digest API.
@@ -584,7 +646,7 @@ fn sha2_lib_rs(version: &str) -> String {
 use sha2::{{Digest, Sha256, Sha512}};
 use std::os::raw::c_char;
 use std::slice;
-
+{guard}
 #[no_mangle]
 pub extern "C" fn sha2_abi_version() -> u32 {{
     3
@@ -605,6 +667,7 @@ pub extern "C" fn sha2_name() -> *const c_char {{
 /// Returns `0` on success, `-1` if `data` is null with nonzero len, `-2` if `out` is null.
 #[no_mangle]
 pub extern "C" fn sha2_hash_256(data: *const u8, len: usize, out: *mut u8) -> i32 {{
+    rig_guard(-127, move || {{
     if out.is_null() {{
         return -2;
     }}
@@ -621,6 +684,7 @@ pub extern "C" fn sha2_hash_256(data: *const u8, len: usize, out: *mut u8) -> i3
         slice::from_raw_parts_mut(out, 32).copy_from_slice(&digest);
     }}
     0
+    }})
 }}
 
 /// Hash `len` bytes at `data` into a 64-byte `out` buffer (SHA-512).
@@ -628,6 +692,7 @@ pub extern "C" fn sha2_hash_256(data: *const u8, len: usize, out: *mut u8) -> i3
 /// Returns `0` on success, `-1` if `data` is null with nonzero len, `-2` if `out` is null.
 #[no_mangle]
 pub extern "C" fn sha2_hash_512(data: *const u8, len: usize, out: *mut u8) -> i32 {{
+    rig_guard(-127, move || {{
     if out.is_null() {{
         return -2;
     }}
@@ -644,6 +709,7 @@ pub extern "C" fn sha2_hash_512(data: *const u8, len: usize, out: *mut u8) -> i3
         slice::from_raw_parts_mut(out, 64).copy_from_slice(&digest);
     }}
     0
+    }})
 }}
 "#
     )
@@ -675,12 +741,13 @@ int32_t sha2_hash_512(const uint8_t *data, size_t len, uint8_t *out);
 }
 
 fn crc32fast_lib_rs(version: &str) -> String {
+    let guard = rig_guard_src("crc32fast");
     format!(
         r#"//! rig-generated C ABI façade for `crc32fast` (markers + hash helper).
 
 use std::os::raw::c_char;
 use std::slice;
-
+{guard}
 #[no_mangle]
 pub extern "C" fn crc32fast_abi_version() -> u32 {{
     2
@@ -702,17 +769,20 @@ pub extern "C" fn crc32fast_name() -> *const c_char {{
 /// callers should validate pointers).
 #[no_mangle]
 pub extern "C" fn crc32fast_hash(data: *const u8, len: usize) -> u32 {{
+    rig_guard(0, move || {{
     if len == 0 || data.is_null() {{
         return crc32fast::hash(&[]);
     }}
     let input = unsafe {{ slice::from_raw_parts(data, len) }};
     crc32fast::hash(input)
+    }})
 }}
 "#
     )
 }
 
 fn md5_lib_rs(version: &str) -> String {
+    let guard = rig_guard_src("md5");
     format!(
         r#"//! rig-generated C ABI façade for `md-5` (markers + MD5 helper).
 //! Known enrichment — MD5 is not for new security-sensitive designs.
@@ -720,7 +790,7 @@ fn md5_lib_rs(version: &str) -> String {
 use md5::{{Digest, Md5}};
 use std::os::raw::c_char;
 use std::slice;
-
+{guard}
 #[no_mangle]
 pub extern "C" fn md5_abi_version() -> u32 {{
     2
@@ -739,6 +809,7 @@ pub extern "C" fn md5_name() -> *const c_char {{
 /// MD5: write 16 bytes to `out`. 0 ok; -1 null data; -2 null out.
 #[no_mangle]
 pub extern "C" fn md5_hash(data: *const u8, len: usize, out: *mut u8) -> i32 {{
+    rig_guard(-127, move || {{
     if out.is_null() {{
         return -2;
     }}
@@ -755,6 +826,7 @@ pub extern "C" fn md5_hash(data: *const u8, len: usize, out: *mut u8) -> i32 {{
         slice::from_raw_parts_mut(out, 16).copy_from_slice(&digest);
     }}
     0
+    }})
 }}
 "#
     )
@@ -839,12 +911,13 @@ fn hex_exports() -> Vec<ExportFn> {
 }
 
 fn hex_lib_rs(version: &str) -> String {
+    let guard = rig_guard_src("hex");
     format!(
         r#"//! rig-generated C ABI façade for `hex` (markers + encode/decode helpers).
 
 use std::os::raw::c_char;
 use std::slice;
-
+{guard}
 #[no_mangle]
 pub extern "C" fn hex_abi_version() -> u32 {{
     2
@@ -863,7 +936,9 @@ pub extern "C" fn hex_name() -> *const c_char {{
 /// Bytes needed to hex-encode `len` input bytes (no NUL).
 #[no_mangle]
 pub extern "C" fn hex_encode_len(len: usize) -> usize {{
+    rig_guard(0, move || {{
     len.saturating_mul(2)
+    }})
 }}
 
 /// Hex-encode `len` bytes at `data` into `out` (must be >= 2*len).
@@ -875,6 +950,7 @@ pub extern "C" fn hex_encode(
     out: *mut u8,
     out_len: usize,
 ) -> i32 {{
+    rig_guard(-127, move || {{
     if out.is_null() {{
         return -2;
     }}
@@ -895,6 +971,7 @@ pub extern "C" fn hex_encode(
         slice::from_raw_parts_mut(out, need).copy_from_slice(encoded.as_bytes());
     }}
     0
+    }})
 }}
 
 /// Hex-decode `len` ASCII hex bytes at `data` into `out` (must be >= len/2).
@@ -906,6 +983,7 @@ pub extern "C" fn hex_decode(
     out: *mut u8,
     out_len: usize,
 ) -> i32 {{
+    rig_guard(-127, move || {{
     if out.is_null() {{
         return -2;
     }}
@@ -930,6 +1008,7 @@ pub extern "C" fn hex_decode(
         }}
         Err(_) => -4,
     }}
+    }})
 }}
 "#
     )
@@ -994,13 +1073,14 @@ fn base64_exports() -> Vec<ExportFn> {
 }
 
 fn base64_lib_rs(version: &str) -> String {
+    let guard = rig_guard_src("base64");
     format!(
         r#"//! rig-generated C ABI façade for `base64` (markers + STANDARD encode/decode).
 
 use base64::{{engine::general_purpose::STANDARD, Engine as _}};
 use std::os::raw::c_char;
 use std::slice;
-
+{guard}
 #[no_mangle]
 pub extern "C" fn base64_abi_version() -> u32 {{
     2
@@ -1019,7 +1099,9 @@ pub extern "C" fn base64_name() -> *const c_char {{
 /// Bytes needed to base64-encode `len` input bytes (no NUL).
 #[no_mangle]
 pub extern "C" fn base64_encode_len(len: usize) -> usize {{
+    rig_guard(0, move || {{
     len.saturating_mul(4).div_ceil(3)
+    }})
 }}
 
 /// Base64-encode `len` bytes at `data` into `out` (STANDARD alphabet).
@@ -1031,6 +1113,7 @@ pub extern "C" fn base64_encode(
     out: *mut u8,
     out_len: usize,
 ) -> i32 {{
+    rig_guard(-127, move || {{
     if out.is_null() {{
         return -2;
     }}
@@ -1051,6 +1134,7 @@ pub extern "C" fn base64_encode(
         Ok(_) => 0,
         Err(_) => -3,
     }}
+    }})
 }}
 
 /// Base64-decode `len` ASCII bytes at `data` into `out`.
@@ -1062,6 +1146,7 @@ pub extern "C" fn base64_decode(
     out: *mut u8,
     out_len: usize,
 ) -> i32 {{
+    rig_guard(-127, move || {{
     if out.is_null() {{
         return -2;
     }}
@@ -1078,6 +1163,7 @@ pub extern "C" fn base64_decode(
         Ok(_) => 0,
         Err(_) => -4,
     }}
+    }})
 }}
 "#
     )
@@ -1109,6 +1195,7 @@ fn generic_lib_rs_with_wraps(
         1
     };
     let wraps = surface::emit_rust_wrappers(exports);
+    let guard = rig_guard_src(&safe);
     format!(
         r#"//! rig-generated C ABI façade for `{name}`.
 //! {note}
@@ -1118,7 +1205,7 @@ use std::os::raw::c_char;
 
 #[allow(dead_code, unused_imports)]
 use {safe};
-
+{guard}
 /// Façade ABI revision (2 when auto-wrap exports are present).
 #[no_mangle]
 pub extern "C" fn {safe}_abi_version() -> u32 {{

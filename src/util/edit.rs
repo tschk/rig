@@ -193,6 +193,89 @@ pub fn patch_build_zig_link(
     Ok(())
 }
 
+/// The package's build script: `[package] build = "…"`, else `build.rs`.
+/// `None` when the manifest sets `build = false`.
+fn build_script_path(root: &Path) -> Result<Option<std::path::PathBuf>> {
+    let cargo = std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
+    let doc: toml::Table = cargo.parse().unwrap_or_default();
+    match doc.get("package").and_then(|p| p.get("build")) {
+        Some(toml::Value::String(s)) => Ok(Some(root.join(s))),
+        Some(toml::Value::Boolean(false)) => Ok(None),
+        _ => Ok(Some(root.join("build.rs"))),
+    }
+}
+
+fn build_rs_markers(name: &str) -> (String, String) {
+    (
+        format!("    // rig-link-begin:{name}\n"),
+        format!("    // rig-link-end:{name}\n"),
+    )
+}
+
+/// Idempotently add link-search + rpath lines for a rig-built native library
+/// to the Rust host's build script (created when absent), between
+/// per-package `rig-link` markers at the top of `fn main`.
+pub fn patch_build_rs_link(root: &Path, name: &str, native_rel: &str) -> Result<()> {
+    let Some(path) = build_script_path(root)? else {
+        anyhow::bail!(
+            "Cargo.toml sets `build = false`; rig needs a build script to link `{name}` \
+             (add `cargo:rustc-link-search=native={native_rel}` yourself or enable build.rs)"
+        );
+    };
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+        "// Build script — rig manages the rig-link blocks.\nfn main() {\n}\n".into()
+    });
+    let text = strip_build_rs_link(&text, name);
+    let Some(main_at) = text.find("fn main() {") else {
+        anyhow::bail!(
+            "{} has no `fn main() {{`; cannot add rig link settings for `{name}`",
+            path.display()
+        );
+    };
+    let insert_at = main_at + "fn main() {".len();
+    let insert_at = text[insert_at..]
+        .find('\n')
+        .map(|n| insert_at + n + 1)
+        .unwrap_or(text.len());
+    let rel = native_rel.replace('\\', "/").replace('"', "\\\"");
+    let (begin, end) = build_rs_markers(name);
+    let block = format!(
+        "{begin}    {{\n        let dir = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"{rel}\");\n        println!(\"cargo:rustc-link-search=native={{}}\", dir.display());\n        if std::env::var_os(\"CARGO_CFG_UNIX\").is_some() {{\n            println!(\"cargo:rustc-link-arg=-Wl,-rpath,{{}}\", dir.display());\n        }}\n    }}\n{end}"
+    );
+    let mut out = text;
+    if !out[..insert_at].ends_with('\n') {
+        out.insert(insert_at, '\n');
+        out.insert_str(insert_at + 1, &block);
+    } else {
+        out.insert_str(insert_at, &block);
+    }
+    std::fs::write(&path, out).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+/// Remove `name`'s rig-link block from the build script, if present.
+pub fn unpatch_build_rs_link(root: &Path, name: &str) -> Result<()> {
+    let Some(path) = build_script_path(root)? else {
+        return Ok(());
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let stripped = strip_build_rs_link(&text, name);
+    if stripped != text {
+        std::fs::write(&path, stripped)?;
+    }
+    Ok(())
+}
+
+fn strip_build_rs_link(text: &str, name: &str) -> String {
+    let (begin, end) = build_rs_markers(name);
+    match (text.find(&begin), text.find(&end)) {
+        (Some(b), Some(e)) if e > b => format!("{}{}", &text[..b], &text[e + end.len()..]),
+        _ => text.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

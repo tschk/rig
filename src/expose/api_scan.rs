@@ -1,6 +1,7 @@
 //! Public-API scan for simple extern-C-friendly Rust functions.
 //!
-//! Scans crate sources for:
+//! Parses crate sources with `syn`, following the module tree from the lib
+//! entry point, and collects:
 //! 1. Existing `#[no_mangle] extern "C"` / `extern "C"` exports (re-exported as-is).
 //! 2. Plain `pub fn` / `pub const fn` with only FFI-safe scalar/pointer types
 //!    (wrapped as `{crate}_{fn}`).
@@ -343,6 +344,10 @@ pub struct ScanReport {
     pub skipped_async: usize,
     pub skipped_unfriendly: usize,
     pub skipped_impl_methods: usize,
+    /// `pub fn`s in private modules that are not re-exported at the crate root.
+    pub skipped_private: usize,
+    /// Source files `syn` could not parse (their items are not exported).
+    pub parse_errors: usize,
     pub source_root: Option<PathBuf>,
 }
 
@@ -574,420 +579,403 @@ fn parse_shared_str_or_bytes(ty_norm: &str) -> Option<SharedBorrow> {
     }
 }
 
-fn split_params(params: &str) -> Option<Vec<Param>> {
-    let params = params.trim();
-    if params.is_empty() {
-        return Some(vec![]);
+/// Append one Rust parameter (expanding `&str` / `&[u8]` into ptr + len).
+fn push_param(out: &mut Vec<Param>, name: &str, ty_raw: &str) -> Option<()> {
+    // Avoid C/Rust keyword collisions in generated headers
+    let name = match name {
+        "type" | "in" | "out" | "string" | "mod" | "fn" | "let" | "pub" => format!("{name}_"),
+        _ => name.to_string(),
+    };
+    // Expand shared `&str` / `&[u8]` (any lifetime) into (ptr, len).
+    // `&mut str` / `&mut [u8]` / `&[T]` (T != u8) stay unfriendly skips.
+    let ty_norm = ty_raw.replace(' ', "");
+    if let Some(kind) = parse_shared_str_or_bytes(&ty_norm) {
+        let adapt = match kind {
+            SharedBorrow::Str => TypeAdapt::StrSlice,
+            SharedBorrow::Bytes => TypeAdapt::ByteSlice,
+        };
+        out.push(Param {
+            name: name.clone(),
+            ty: FfiType::ConstPtr(Box::new(FfiType::U8)),
+            adapt,
+        });
+        out.push(Param {
+            name: format!("{name}_len"),
+            ty: FfiType::Usize,
+            adapt: TypeAdapt::Identity,
+        });
+        return Some(());
     }
-    let mut out = Vec::new();
-    for (idx, part) in split_top_level(params, ',').into_iter().enumerate() {
-        let part = part.trim();
-        if part.is_empty() {
+    let (ty, adapt) = parse_ffi_type_adapted(ty_raw)?;
+    out.push(Param { name, ty, adapt });
+    Some(())
+}
+
+/// Scan a crate source root (`Cargo.toml` + lib entry) by parsing it with `syn`.
+///
+/// Follows the module tree from the library entry point (`[lib] path`, else
+/// `src/lib.rs`, else `lib.rs`) so callee paths are real (`crate::a::b::f`).
+/// Exports only free `pub fn`s reachable from outside the crate: through a
+/// chain of `pub mod`s, or via a `pub use` at the crate root. Skips items under
+/// `#[cfg(..)]`, `impl`/trait methods, `extern` import blocks, and macro bodies.
+pub fn scan_crate_sources(crate_root: &Path, package_name: &str) -> ScanReport {
+    let mut scan = SynScan {
+        report: ScanReport {
+            source_root: Some(crate_root.to_path_buf()),
+            ..Default::default()
+        },
+        safe: crate_ident(package_name),
+        fns: Vec::new(),
+        root_names: Default::default(),
+        root_globs: Vec::new(),
+    };
+    let Some(lib) = lib_entry(crate_root) else {
+        return scan.report;
+    };
+    let Some(file) = scan.parse(&lib) else {
+        return scan.report;
+    };
+    let dir = lib.parent().unwrap_or(crate_root).to_path_buf();
+    scan.collect_root_uses(&file.items);
+    scan.walk_items(&file.items, &[], true, &dir);
+
+    let mut seen = BTreeSet::new();
+    let fns = std::mem::take(&mut scan.fns);
+    for found in fns {
+        let leaf = found.item.sig.ident.to_string();
+        let (callee_path, export_stem) = if found.public_chain {
+            let mut p = found.module.clone();
+            p.push(leaf.clone());
+            (p.join("::"), p.join("_"))
+        } else if let Some(alias) = scan.root_alias(&found.module, &leaf) {
+            (alias.clone(), alias)
+        } else {
+            scan.report.skipped_private += 1;
             continue;
-        }
-        // self receivers → method (skip at call site)
-        if part == "self"
-            || part.starts_with("&self")
-            || part.starts_with("&mut self")
-            || part.starts_with("self:")
-            || part.starts_with("mut self")
+        };
+        let callee = format!("{}::{callee_path}", scan.safe);
+        if let Some(export) = classify_item_fn(
+            &found.item,
+            &scan.safe,
+            &export_stem,
+            callee,
+            &mut scan.report,
+        ) && seen.insert(export.export_name.clone())
         {
+            scan.report.exports.push(export);
+        }
+    }
+    scan.report
+}
+
+struct FoundFn {
+    module: Vec<String>,
+    public_chain: bool,
+    item: syn::ItemFn,
+}
+
+struct SynScan {
+    report: ScanReport,
+    safe: String,
+    fns: Vec<FoundFn>,
+    /// Root `pub use` re-exports: (source path, exported ident).
+    root_names: Vec<(Vec<String>, String)>,
+    /// Root `pub use path::*` globs.
+    root_globs: Vec<Vec<String>>,
+}
+
+impl SynScan {
+    fn parse(&mut self, path: &Path) -> Option<syn::File> {
+        let text = std::fs::read_to_string(path).ok()?;
+        match syn::parse_file(&text) {
+            Ok(f) => Some(f),
+            Err(_) => {
+                self.report.parse_errors += 1;
+                None
+            }
+        }
+    }
+
+    fn walk_items(
+        &mut self,
+        items: &[syn::Item],
+        module: &[String],
+        public_chain: bool,
+        dir: &Path,
+    ) {
+        for item in items {
+            match item {
+                syn::Item::Fn(f) => {
+                    if !is_public(&f.vis) || has_cfg(&f.attrs) {
+                        continue;
+                    }
+                    self.fns.push(FoundFn {
+                        module: module.to_vec(),
+                        public_chain,
+                        item: f.clone(),
+                    });
+                }
+                syn::Item::Impl(imp) => {
+                    self.report.skipped_impl_methods += imp
+                        .items
+                        .iter()
+                        .filter(|i| matches!(i, syn::ImplItem::Fn(m) if is_public(&m.vis)))
+                        .count();
+                }
+                syn::Item::Mod(m) => {
+                    if has_cfg(&m.attrs) {
+                        continue;
+                    }
+                    let name = m.ident.to_string();
+                    let mut child = module.to_vec();
+                    child.push(name.clone());
+                    let child_public = public_chain && is_public(&m.vis);
+                    let child_dir = dir.join(&name);
+                    if let Some((_, items)) = &m.content {
+                        self.walk_items(items, &child, child_public, &child_dir);
+                        continue;
+                    }
+                    let file = match path_attr(&m.attrs) {
+                        Some(p) => Some(dir.join(p)),
+                        None => [dir.join(format!("{name}.rs")), child_dir.join("mod.rs")]
+                            .into_iter()
+                            .find(|p| p.is_file()),
+                    };
+                    let Some(file) = file else { continue };
+                    let Some(parsed) = self.parse(&file) else {
+                        continue;
+                    };
+                    let next_dir = if file.file_name().is_some_and(|f| f == "mod.rs") {
+                        file.parent().unwrap_or(dir).to_path_buf()
+                    } else {
+                        child_dir
+                    };
+                    self.walk_items(&parsed.items, &child, child_public, &next_dir);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn collect_root_uses(&mut self, items: &[syn::Item]) {
+        for item in items {
+            if let syn::Item::Use(u) = item
+                && is_public(&u.vis)
+                && !has_cfg(&u.attrs)
+            {
+                self.collect_use_tree(&u.tree, Vec::new());
+            }
+        }
+    }
+
+    fn collect_use_tree(&mut self, tree: &syn::UseTree, prefix: Vec<String>) {
+        match tree {
+            syn::UseTree::Path(p) => {
+                let mut next = prefix;
+                let seg = p.ident.to_string();
+                if !(next.is_empty() && matches!(seg.as_str(), "self" | "crate")) {
+                    next.push(seg);
+                }
+                self.collect_use_tree(&p.tree, next);
+            }
+            syn::UseTree::Name(n) => {
+                let mut src = prefix;
+                let name = n.ident.to_string();
+                src.push(name.clone());
+                self.root_names.push((src, name));
+            }
+            syn::UseTree::Rename(r) => {
+                let mut src = prefix;
+                src.push(r.ident.to_string());
+                self.root_names.push((src, r.rename.to_string()));
+            }
+            syn::UseTree::Glob(_) => self.root_globs.push(prefix),
+            syn::UseTree::Group(g) => {
+                for t in &g.items {
+                    self.collect_use_tree(t, prefix.clone());
+                }
+            }
+        }
+    }
+
+    /// Root-level name under which `module::leaf` is re-exported, if any.
+    fn root_alias(&self, module: &[String], leaf: &str) -> Option<String> {
+        let mut full = module.to_vec();
+        full.push(leaf.to_string());
+        self.root_names
+            .iter()
+            .find(|(src, _)| *src == full)
+            .map(|(_, name)| name.clone())
+            .or_else(|| {
+                self.root_globs
+                    .iter()
+                    .any(|g| g.as_slice() == module)
+                    .then(|| leaf.to_string())
+            })
+    }
+}
+
+fn lib_entry(crate_root: &Path) -> Option<PathBuf> {
+    let declared = std::fs::read_to_string(crate_root.join("Cargo.toml"))
+        .ok()
+        .and_then(|t| t.parse::<toml::Table>().ok())
+        .and_then(|t| {
+            t.get("lib")?
+                .get("path")?
+                .as_str()
+                .map(|p| crate_root.join(p))
+        });
+    declared
+        .into_iter()
+        .chain([crate_root.join("src/lib.rs"), crate_root.join("lib.rs")])
+        .find(|p| p.is_file())
+}
+
+fn is_public(vis: &syn::Visibility) -> bool {
+    matches!(vis, syn::Visibility::Public(_))
+}
+
+fn has_cfg(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| a.path().is_ident("cfg"))
+}
+
+fn path_attr(attrs: &[syn::Attribute]) -> Option<String> {
+    attrs.iter().find_map(|a| {
+        if !a.path().is_ident("path") {
             return None;
         }
-        let (name, ty_raw) = if let Some((n, t)) = part.split_once(':') {
-            let n = n.trim().trim_start_matches("mut ").trim();
-            if n.is_empty() {
-                return None;
-            }
-            (n.to_string(), t.trim())
-        } else {
-            // unnamed — synthesize
-            (format!("arg{idx}"), part)
-        };
-        // Avoid C/Rust keyword collisions in generated headers
-        let name = match name.as_str() {
-            "type" | "in" | "out" | "string" | "mod" | "fn" | "let" | "pub" => {
-                format!("{name}_")
-            }
-            _ => name,
-        };
-        // Expand shared `&str` / `&[u8]` (any lifetime) into (ptr, len).
-        // `&mut str` / `&mut [u8]` / `&[T]` (T != u8) stay unfriendly skips.
-        let ty_norm = ty_raw.replace(' ', "");
-        if let Some(kind) = parse_shared_str_or_bytes(&ty_norm) {
-            let adapt = match kind {
-                SharedBorrow::Str => TypeAdapt::StrSlice,
-                SharedBorrow::Bytes => TypeAdapt::ByteSlice,
-            };
-            out.push(Param {
-                name: name.clone(),
-                ty: FfiType::ConstPtr(Box::new(FfiType::U8)),
-                adapt,
-            });
-            out.push(Param {
-                name: format!("{name}_len"),
-                ty: FfiType::Usize,
-                adapt: TypeAdapt::Identity,
-            });
-            continue;
+        match &a.meta {
+            syn::Meta::NameValue(nv) => match &nv.value {
+                syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(s),
+                    ..
+                }) => Some(s.value()),
+                _ => None,
+            },
+            _ => None,
         }
-        let (ty, adapt) = parse_ffi_type_adapted(ty_raw)?;
-        out.push(Param { name, ty, adapt });
-    }
-    Some(out)
+    })
 }
 
-fn split_top_level(s: &str, sep: char) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut cur = String::new();
-    let mut depth = 0i32;
-    for ch in s.chars() {
-        match ch {
-            '(' | '[' | '<' => {
-                depth += 1;
-                cur.push(ch);
-            }
-            ')' | ']' | '>' => {
-                depth -= 1;
-                cur.push(ch);
-            }
-            c if c == sep && depth == 0 => {
-                parts.push(std::mem::take(&mut cur));
-            }
-            _ => cur.push(ch),
+/// `#[no_mangle]`, `#[unsafe(no_mangle)]`, or `#[export_name = ".."]` (edition 2024 form included).
+fn exported_symbol(attrs: &[syn::Attribute], ident: &str) -> Option<String> {
+    for a in attrs {
+        let path = a.path();
+        if path.is_ident("no_mangle") {
+            return Some(ident.to_string());
         }
-    }
-    if !cur.is_empty() {
-        parts.push(cur);
-    }
-    parts
-}
-
-/// Scan a crate source root (`Cargo.toml` + `src/`).
-pub fn scan_crate_sources(crate_root: &Path, package_name: &str) -> ScanReport {
-    let mut report = ScanReport {
-        source_root: Some(crate_root.to_path_buf()),
-        ..Default::default()
-    };
-    let safe = crate_ident(package_name);
-    let mut seen = BTreeSet::new();
-    let root_api = collect_root_api_names(crate_root);
-    let src = crate_root.join("src");
-    let mut roots: Vec<std::path::PathBuf> = Vec::new();
-    if src.is_dir() {
-        roots.push(src);
-    } else {
-        // Crates with `[lib] path = "lib.rs"` (no `src/`) still expose a surface.
-        for cand in ["lib.rs", "main.rs"] {
-            let p = crate_root.join(cand);
-            if p.is_file()
-                && let Ok(text) = std::fs::read_to_string(&p)
+        if path.is_ident("export_name") {
+            return path_attr_value(a);
+        }
+        if path.is_ident("unsafe")
+            && let Ok(inner) = a.parse_args::<syn::Meta>()
+        {
+            if inner.path().is_ident("no_mangle") {
+                return Some(ident.to_string());
+            }
+            if inner.path().is_ident("export_name")
+                && let syn::Meta::NameValue(nv) = inner
+                && let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(s),
+                    ..
+                }) = nv.value
             {
-                scan_file_text(&text, &safe, &mut report, &mut seen);
+                return Some(s.value());
             }
         }
     }
-    for root in &roots {
-        let walker = walkdir::WalkDir::new(root)
-            .into_iter()
-            .filter_map(|e| e.ok());
-        for ent in walker {
-            let path = ent.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                continue;
-            }
-            let Ok(text) = std::fs::read_to_string(path) else {
-                continue;
-            };
-            scan_file_text(&text, &safe, &mut report, &mut seen);
-        }
-    }
-    if !root_api.is_empty() {
-        let before = report.exports.len();
-        report.exports.retain(|e| match e.kind {
-            ExportKind::UpstreamExternC => true,
-            ExportKind::AutoWrap => e
-                .rust_callee
-                .as_deref()
-                .and_then(|c| c.rsplit("::").next())
-                .is_some_and(|n| root_api.contains(n)),
-            _ => true,
-        });
-        let dropped = before.saturating_sub(report.exports.len());
-        report.skipped_unfriendly += dropped;
-    }
-    report
+    None
 }
 
-/// Names reachable at the crate root via `pub use` / `pub fn` in `lib.rs`.
-/// Used to avoid wrapping `pub` items that are only `pub(crate)` re-exported.
-fn collect_root_api_names(crate_root: &Path) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    let walker = walkdir::WalkDir::new(crate_root.join("src"))
-        .into_iter()
-        .filter_map(|e| e.ok());
-    for ent in walker {
-        let path = ent.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        let mut cfg_gated = false;
-        for line in text.lines() {
-            let t = line.trim();
-            // cfg-gated re-exports may not exist in the default-feature build.
-            if t.starts_with("#[cfg(") {
-                cfg_gated = true;
-                continue;
-            }
-            if t.starts_with("pub use ") {
-                if !cfg_gated {
-                    extract_use_idents(t, &mut names);
-                }
-                cfg_gated = false;
-            }
-        }
-    }
-    // Also top-level pub fns in lib.rs (src/ or crate-root layout).
-    for lib in [crate_root.join("src/lib.rs"), crate_root.join("lib.rs")] {
-        let Ok(text) = std::fs::read_to_string(&lib) else {
-            continue;
-        };
-        for line in text.lines() {
-            let t = line.trim();
-            if (t.starts_with("pub fn")
-                || t.starts_with("pub const fn")
-                || t.starts_with("pub unsafe fn")
-                || t.starts_with("pub extern")
-                || t.starts_with("pub unsafe extern"))
-                && let Some(rest) = t.split("fn ").nth(1)
-            {
-                let name: String = rest
-                    .chars()
-                    .take_while(|c| c.is_alphanumeric() || *c == '_')
-                    .collect();
-                if !name.is_empty() {
-                    names.insert(name);
-                }
-            }
-        }
-    }
-    names
-}
-
-fn extract_use_idents(line: &str, out: &mut BTreeSet<String>) {
-    // pub use foo::bar::{a, b as c, *};
-    let Some(after) = line.strip_prefix("pub use ") else {
-        return;
-    };
-    let after = after.trim().trim_end_matches(';').trim();
-    if let Some(braced) = after.rfind('{') {
-        let inside = after[braced + 1..].trim().trim_end_matches('}').trim();
-        for part in inside.split(',') {
-            let part = part.trim();
-            if part.is_empty() || part == "*" {
-                continue;
-            }
-            // `a as b` → export name b
-            let ident = part.split_whitespace().last().unwrap_or(part);
-            if ident != "self" && ident != "super" && ident != "crate" {
-                out.insert(ident.to_string());
-            }
-        }
-    } else {
-        // pub use foo::bar;
-        let ident = after.rsplit("::").next().unwrap_or(after).trim();
-        if ident != "*" && !ident.is_empty() {
-            out.insert(ident.to_string());
-        }
+fn path_attr_value(a: &syn::Attribute) -> Option<String> {
+    match &a.meta {
+        syn::Meta::NameValue(nv) => match &nv.value {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(s),
+                ..
+            }) => Some(s.value()),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
-fn scan_file_text(
-    text: &str,
+fn tokens(t: &impl quote::ToTokens) -> String {
+    t.to_token_stream().to_string()
+}
+
+fn classify_item_fn(
+    f: &syn::ItemFn,
     crate_safe: &str,
-    report: &mut ScanReport,
-    seen: &mut BTreeSet<String>,
-) {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut i = 0usize;
-    let mut brace_depth = 0i32;
-    let mut impl_body_depths: Vec<i32> = Vec::new();
-    let mut pending_impl = false;
-
-    while i < lines.len() {
-        let trimmed = lines[i].trim();
-        if trimmed.starts_with("impl ") || trimmed.starts_with("impl<") {
-            pending_impl = true;
-        }
-
-        let in_impl = !impl_body_depths.is_empty();
-        let is_pub_fn = trimmed.starts_with("pub fn")
-            || trimmed.starts_with("pub const fn")
-            || trimmed.starts_with("pub async fn")
-            || trimmed.starts_with("pub unsafe fn")
-            || trimmed.starts_with("pub extern")
-            || trimmed.starts_with("pub unsafe extern");
-
-        if is_pub_fn {
-            if in_impl || pending_impl {
-                report.skipped_impl_methods += 1;
-            } else {
-                let prev_attrs_no_mangle = lines[..i].iter().rev().take(4).any(|l| {
-                    let t = l.trim();
-                    t.contains("#[no_mangle]") || t.contains("#[export_name")
-                });
-                let mut sig = trimmed.to_string();
-                let mut j = i;
-                while !sig.contains('{') && !sig.trim_end().ends_with(';') && j + 1 < lines.len() {
-                    j += 1;
-                    sig.push(' ');
-                    sig.push_str(lines[j].trim());
-                    if j - i > 8 {
-                        break;
-                    }
-                }
-                if let Some(export) =
-                    classify_signature(&sig, crate_safe, prev_attrs_no_mangle, report)
-                    && seen.insert(export.export_name.clone())
-                {
-                    report.exports.push(export);
-                }
-                // Account braces on continuation lines before the final line.
-                while i < j {
-                    let t = lines[i].trim();
-                    let opens = t.matches('{').count() as i32;
-                    let closes = t.matches('}').count() as i32;
-                    brace_depth += opens - closes;
-                    if pending_impl && opens > 0 {
-                        impl_body_depths.push(brace_depth);
-                        pending_impl = false;
-                    }
-                    while impl_body_depths.last().is_some_and(|d| brace_depth < *d) {
-                        impl_body_depths.pop();
-                    }
-                    i += 1;
-                }
-            }
-        }
-
-        let opens = trimmed.matches('{').count() as i32;
-        let closes = trimmed.matches('}').count() as i32;
-        brace_depth += opens - closes;
-        if pending_impl && opens > 0 {
-            impl_body_depths.push(brace_depth);
-            pending_impl = false;
-        }
-        while impl_body_depths.last().is_some_and(|d| brace_depth < *d) {
-            impl_body_depths.pop();
-        }
-
-        i += 1;
-    }
-}
-
-fn classify_signature(
-    sig: &str,
-    crate_safe: &str,
-    no_mangle: bool,
+    export_stem: &str,
+    callee: String,
     report: &mut ScanReport,
 ) -> Option<ExportFn> {
-    let compact = sig.split_whitespace().collect::<Vec<_>>().join(" ");
-
-    if compact.contains(" async ") || compact.starts_with("pub async") {
+    let sig = &f.sig;
+    if sig.asyncness.is_some() {
         report.skipped_async += 1;
         return None;
     }
-    if compact.contains('<')
-        && compact
-            .find("fn ")
-            .is_some_and(|p| compact[p..].contains('<'))
+    if sig
+        .generics
+        .params
+        .iter()
+        .any(|p| !matches!(p, syn::GenericParam::Lifetime(_)))
     {
-        // generic params on the function
-        if let Some(fn_pos) = compact.find("fn ") {
-            let after = &compact[fn_pos + 3..];
-            if after.trim_start().starts_with('<')
-                || after
-                    .chars()
-                    .take_while(|c| c.is_alphanumeric() || *c == '_')
-                    .collect::<String>()
-                    .len()
-                    < after.find('(').unwrap_or(0)
-                    && after[..after.find('(').unwrap_or(0)].contains('<')
-            {
-                report.skipped_generics += 1;
-                return None;
-            }
-            let name_end = after.find('(').unwrap_or(after.len());
-            if after[..name_end].contains('<') {
-                report.skipped_generics += 1;
-                return None;
-            }
-        }
-    }
-
-    let is_extern_c = compact.contains("extern \"C\"")
-        || compact.contains("extern \"c\"")
-        || compact.contains("extern \"C-unwind\"")
-        || compact.contains("extern'C'");
-    let is_unsafe = compact.contains("unsafe ");
-
-    // Extract fn name + params + ret
-    let fn_idx = compact.find("fn ")?;
-    let after_fn = &compact[fn_idx + 3..];
-    let name_end = after_fn.find('(')?;
-    let name = after_fn[..name_end].trim();
-    if name.is_empty() || name == "main" {
-        return None;
-    }
-    if name.contains('<') {
         report.skipped_generics += 1;
         return None;
     }
-    let rest = &after_fn[name_end..];
-    let params_end = matching_paren(rest)?;
-    let params_raw = &rest[1..params_end];
-    let after_params = rest[params_end + 1..].trim();
-    let ret_raw = if let Some(r) = after_params.strip_prefix("->") {
-        r.split('{')
-            .next()
-            .unwrap_or(r)
-            .split(';')
-            .next()
-            .unwrap_or("")
-            .split("where")
-            .next()
-            .unwrap_or("")
-            .trim()
-    } else {
-        "()"
-    };
-    if compact.contains("where ") {
+    if sig.generics.where_clause.is_some() || sig.variadic.is_some() {
         report.skipped_unfriendly += 1;
         return None;
     }
+    let name = sig.ident.to_string();
+    if name == "main" {
+        return None;
+    }
+    let abi_c = match &sig.abi {
+        None => false,
+        Some(abi) => match abi.name.as_ref().map(|n| n.value()) {
+            None => true, // bare `extern` = "C"
+            Some(n) if matches!(n.as_str(), "C" | "C-unwind") => true,
+            Some(n) if n == "Rust" => false,
+            Some(_) => {
+                report.skipped_unfriendly += 1;
+                return None;
+            }
+        },
+    };
 
-    let params = match split_params(params_raw) {
-        Some(p) => p,
-        None => {
+    let mut params = Vec::new();
+    for (idx, arg) in sig.inputs.iter().enumerate() {
+        let syn::FnArg::Typed(pt) = arg else {
+            report.skipped_unfriendly += 1;
+            return None;
+        };
+        let pname = match pt.pat.as_ref() {
+            syn::Pat::Ident(pi) => pi.ident.to_string(),
+            _ => format!("arg{idx}"),
+        };
+        if push_param(&mut params, &pname, &tokens(&pt.ty)).is_none() {
             report.skipped_unfriendly += 1;
             return None;
         }
+    }
+    let ret_raw = match &sig.output {
+        syn::ReturnType::Default => "()".to_string(),
+        syn::ReturnType::Type(_, t) => tokens(t),
     };
-    let (ret, ret_adapt) = match parse_ffi_type_adapted(ret_raw) {
-        Some(t) => t,
-        None => {
-            report.skipped_unfriendly += 1;
-            return None;
-        }
+    let Some((ret, ret_adapt)) = parse_ffi_type_adapted(&ret_raw) else {
+        report.skipped_unfriendly += 1;
+        return None;
     };
+    let is_unsafe = sig.unsafety.is_some();
 
-    if is_extern_c && no_mangle {
+    // Upstream already exports an unmangled C symbol: the façade links it through.
+    if abi_c && let Some(symbol) = exported_symbol(&f.attrs, &name) {
         return Some(ExportFn {
-            export_name: name.to_string(),
-            rust_callee: Some(format!("{crate_safe}::{name}")),
+            export_name: symbol,
+            rust_callee: Some(callee),
             params,
             ret,
             ret_adapt,
@@ -995,55 +983,21 @@ fn classify_signature(
             is_unsafe,
         });
     }
-    if is_extern_c {
-        // extern C without no_mangle — re-exported under the same name
-        return Some(ExportFn {
-            export_name: name.to_string(),
-            rust_callee: Some(format!("{crate_safe}::{name}")),
-            params,
-            ret,
-            ret_adapt,
-            kind: ExportKind::UpstreamExternC,
-            is_unsafe,
-        });
-    }
 
-    // Plain Rust fn → prefixed wrap
-    let export_name = if name.starts_with(&format!("{crate_safe}_")) {
-        name.to_string()
+    let export_name = if export_stem.starts_with(&format!("{crate_safe}_")) {
+        export_stem.to_string()
     } else {
-        format!("{crate_safe}_{name}")
+        format!("{crate_safe}_{export_stem}")
     };
     Some(ExportFn {
         export_name,
-        rust_callee: Some(format!("{crate_safe}::{name}")),
+        rust_callee: Some(callee),
         params,
         ret,
         ret_adapt,
         kind: ExportKind::AutoWrap,
         is_unsafe,
     })
-}
-
-fn matching_paren(s: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
-    if bytes.first() != Some(&b'(') {
-        return None;
-    }
-    let mut depth = 0i32;
-    for (i, &b) in bytes.iter().enumerate() {
-        match b {
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 /// Locate unpacked crate sources: path dep, cargo registry, or download into cache.
@@ -1263,8 +1217,11 @@ mod tests {
     }
 
     #[test]
-    fn split_params_expands_str_and_byte_slices() {
-        let params = split_params("s: &str, b: &[u8], n: i32").unwrap();
+    fn push_param_expands_str_and_byte_slices() {
+        let mut params = Vec::new();
+        for (name, ty) in [("s", "&str"), ("b", "&[u8]"), ("n", "i32")] {
+            push_param(&mut params, name, ty).unwrap();
+        }
         assert_eq!(params.len(), 5);
         assert_eq!(params[0].name, "s");
         assert!(matches!(params[0].adapt, TypeAdapt::StrSlice));
@@ -1391,6 +1348,189 @@ pub extern "C-unwind" fn niche_api_raw(x: u32) -> u32 { x }
         assert!(names.contains(&"niche_api_take_nn"), "{names:?}");
         assert!(names.contains(&"niche_api_take_nz"), "{names:?}");
         assert!(names.contains(&"niche_api_raw"), "{names:?}");
+    }
+
+    fn scan_lib(name: &str, files: &[(&str, &str)]) -> ScanReport {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        )
+        .unwrap();
+        for (rel, text) in files {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        }
+        scan_crate_sources(root, name)
+    }
+
+    fn callees(report: &ScanReport) -> Vec<(String, String)> {
+        report
+            .exports
+            .iter()
+            .map(|e| {
+                (
+                    e.export_name.clone(),
+                    e.rust_callee.clone().unwrap_or_default(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn scanner_ignores_test_modules_macros_comments_and_foreign_blocks() {
+        let report = scan_lib(
+            "tricky",
+            &[(
+                "src/lib.rs",
+                r#"
+pub fn real(x: i32) -> i32 { x }
+
+/*
+pub fn commented_out(x: i32) -> i32 { x }
+*/
+
+macro_rules! make {
+    ($n:ident) => {
+        pub fn $n() -> i32 { 0 }
+    };
+}
+
+extern "C" {
+    pub fn imported_from_c(x: i32) -> i32;
+}
+
+#[cfg(test)]
+mod tests {
+    pub fn test_helper(x: i32) -> i32 { x }
+}
+"#,
+            )],
+        );
+        let names: Vec<_> = report
+            .exports
+            .iter()
+            .map(|e| e.export_name.as_str())
+            .collect();
+        assert_eq!(names, vec!["tricky_real"], "{names:?}");
+    }
+
+    #[test]
+    fn scanner_is_not_confused_by_braces_in_strings() {
+        // A `}` inside a string used to close the impl early, turning the
+        // associated fn below into a bogus free-function export.
+        let report = scan_lib(
+            "braces",
+            &[(
+                "src/lib.rs",
+                r#"
+pub struct S;
+impl S {
+    pub fn first(x: i32) -> i32 { let _ = "}"; x }
+    pub fn assoc(y: i32) -> i32 { y }
+}
+pub fn free(z: i32) -> i32 { let _ = '{'; z }
+"#,
+            )],
+        );
+        let names: Vec<_> = report
+            .exports
+            .iter()
+            .map(|e| e.export_name.as_str())
+            .collect();
+        assert_eq!(names, vec!["braces_free"], "{names:?}");
+        assert_eq!(report.skipped_impl_methods, 2);
+    }
+
+    #[test]
+    fn scanner_uses_real_module_paths_and_visibility() {
+        let report = scan_lib(
+            "modded",
+            &[
+                (
+                    "src/lib.rs",
+                    r#"
+pub mod util;
+mod hidden;
+mod private_inline { pub fn unreachable(x: u8) -> u8 { x } }
+pub mod inline { pub fn nested(x: u16) -> u16 { x } }
+pub use hidden::helper as public_helper;
+"#,
+                ),
+                (
+                    "src/util.rs",
+                    "pub fn twice(x: u32) -> u32 { x * 2 }
+",
+                ),
+                (
+                    "src/hidden.rs",
+                    "pub fn helper(x: u64) -> u64 { x }
+pub fn not_reexported(x: u64) -> u64 { x }
+",
+                ),
+            ],
+        );
+        let got = callees(&report);
+        let has = |export: &str, callee: &str| got.iter().any(|(e, c)| e == export && c == callee);
+        assert!(has("modded_util_twice", "modded::util::twice"), "{got:?}");
+        assert!(
+            has("modded_inline_nested", "modded::inline::nested"),
+            "{got:?}"
+        );
+        assert!(
+            has("modded_public_helper", "modded::public_helper"),
+            "{got:?}"
+        );
+        assert!(
+            !got.iter()
+                .any(|(e, _)| e.contains("unreachable") || e.contains("not_reexported")),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn scanner_reads_long_signatures_and_lifetime_only_generics() {
+        let report = scan_lib(
+            "longsig",
+            &[(
+                "src/lib.rs",
+                r#"
+pub fn many(
+    a: i32,
+    b: i32,
+    c: i32,
+    d: i32,
+    e: i32,
+    f: i32,
+    g: i32,
+    h: i32,
+    i: i32,
+    j: i32,
+) -> i32 {
+    a + b + c + d + e + f + g + h + i + j
+}
+
+pub fn borrowed<'a>(s: &'a str) -> usize { s.len() }
+"#,
+            )],
+        );
+        let many = report
+            .exports
+            .iter()
+            .find(|e| e.export_name == "longsig_many")
+            .unwrap_or_else(|| panic!("{:?}", callees(&report)));
+        assert_eq!(many.params.len(), 10);
+        assert_eq!(many.ret, FfiType::I32);
+        assert!(
+            report
+                .exports
+                .iter()
+                .any(|e| e.export_name == "longsig_borrowed"),
+            "{:?}",
+            callees(&report)
+        );
     }
 
     #[test]

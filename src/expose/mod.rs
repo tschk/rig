@@ -8,6 +8,7 @@ pub mod native;
 pub mod nim_host;
 pub mod odin_host;
 pub mod path_native;
+pub mod registry_host;
 pub mod rust_host;
 pub mod shim;
 pub mod stamp;
@@ -358,8 +359,15 @@ fn expose_one(
                 }
             }
         }
-        (Language::Rust, eco) if eco != "cargo" => {
-            rust_host::write_equilibrium_load_stub(&out_path, name, dep, eco)?;
+        (Language::Rust, eco)
+            if matches!(eco, "c" | "cpp" | "zig" | "nim" | "v" | "odin" | "hare") =>
+        {
+            let built =
+                path_native::build_path_git_lib(ctx, name, dep, resolved).map_err(|err| {
+                    anyhow::anyhow!("path/git expose build failed for `{name}` ({eco}): {err}")
+                })?;
+            rust_host::write_rust_path_native(&out_path, name, dep, &built)?;
+            crate::util::edit::patch_build_rs_link(&ctx.root, name, &built.native_rel)?;
             crate::util::edit::ensure_rust_mod_decl(&ctx.root)?;
         }
         (Language::TypeScript, "cargo") => {
@@ -390,14 +398,25 @@ fn expose_one(
                 }
             }
         }
-        (Language::Nim, eco) if eco != "cargo" => {
-            nim_host::write_nim_path_git_stub(&out_path, name, dep)?;
+        // Registry packages consumed by the host's own package manager.
+        (Language::CSharp, "csharp") => {
+            let csproj = registry_host::sync_csproj(ctx)?;
+            return Ok(Some(ExposeResult {
+                out: csproj,
+                consumer,
+            }));
         }
-        (Language::C | Language::Cpp, eco) if eco != "cargo" => {
-            c_host::write_c_path_git_stub(&out_path, name, dep)?;
+        (Language::D, "d") => {
+            let dub = registry_host::add_dub_dep(ctx, name, dep)?;
+            return Ok(Some(ExposeResult { out: dub, consumer }));
         }
-        _ => {
-            rust_host::write_generic_stub(&out_path, name, dep, consumer)?;
+        (host, eco) => {
+            bail!(
+                "rig cannot link `{name}` ({eco}) into a {host} host: there is no native \
+                 C ABI build for {eco} packages, so the only consumer is a {eco} host's own \
+                 package manager. Supported: cargo crates into any host; c/cpp/zig/nim/v/odin/hare \
+                 path/git pins into any host; csharp into C# hosts; d into D hosts."
+            );
         }
     }
 
@@ -480,7 +499,15 @@ fn write_mod_rs(ctx: &AppCtx) -> Result<()> {
     Ok(())
 }
 
-pub fn remove_expose_artifacts(ctx: &AppCtx, name: &str) -> Result<()> {
+pub fn remove_expose_artifacts(ctx: &AppCtx, name: &str, ecosystem: &str) -> Result<()> {
+    match (ctx.host.language, ecosystem) {
+        (Language::CSharp, "csharp") => {
+            registry_host::sync_csproj(ctx)?;
+        }
+        (Language::D, "d") => registry_host::remove_dub_dep(&ctx.root, name)?,
+        (Language::Rust, _) => crate::util::edit::unpatch_build_rs_link(&ctx.root, name)?,
+        _ => {}
+    }
     let safe = name.replace('-', "_");
     let dir = ctx.root.join(&ctx.manifest.expose.dir);
     for ext in ["rs", "zig", "nim", "h", "cs", "v", "d", "odin", "ha", "ts"] {
