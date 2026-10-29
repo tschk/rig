@@ -13,8 +13,13 @@ pub fn scan_header_text(text: &str) -> Vec<ExportFn> {
     let stripped = strip_c_comments(text);
     let mut buf = String::new();
     for raw_line in stripped.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() {
+        // C++ linkage specs: `extern "C" {` … `}` blocks and `extern "C" int f(void);`.
+        let unlinked = raw_line
+            .replace("extern \"C\" {", "")
+            .replace("extern \"C\"{", "")
+            .replace("extern \"C\"", "");
+        let line = unlinked.trim();
+        if line.is_empty() || (buf.is_empty() && line == "}") {
             continue;
         }
         if buf.is_empty() && line.starts_with('#') {
@@ -323,6 +328,16 @@ pub fn headers_under(root: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scans_prototypes_inside_extern_c_blocks() {
+        let text = "#ifdef __cplusplus\nextern \"C\" {\n#endif\nint cxx_add(int a, int b);\n#ifdef __cplusplus\n}\n#endif\nextern \"C\" double cxx_half(double x);\n";
+        let names: Vec<_> = scan_header_text(text)
+            .into_iter()
+            .map(|e| e.export_name)
+            .collect();
+        assert_eq!(names, vec!["cxx_add", "cxx_half"]);
+    }
 
     #[test]
     fn scans_simple_prototypes() {

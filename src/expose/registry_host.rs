@@ -42,7 +42,23 @@ fn xml_attr(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-fn csharp_reference(ctx: &AppCtx, name: &str, dep: &Dependency) -> Result<String> {
+/// A `path:` pin as written in a manifest that lives in `manifest_dir`: kept
+/// relative (portable) when the pin is relative and the manifest sits at the
+/// project root; absolute pins and other layouts use the absolute path.
+fn manifest_path(ctx: &AppCtx, manifest_dir: &Path, pinned: &Path) -> String {
+    if pinned.is_relative() && manifest_dir == ctx.root {
+        pinned.display().to_string()
+    } else {
+        ctx.root.join(pinned).display().to_string()
+    }
+}
+
+fn csharp_reference(
+    ctx: &AppCtx,
+    csproj_dir: &Path,
+    name: &str,
+    dep: &Dependency,
+) -> Result<String> {
     if let Some(path) = &dep.path {
         let dir = ctx.root.join(path);
         let proj = if dir.extension().is_some_and(|e| e == "csproj") {
@@ -55,9 +71,10 @@ fn csharp_reference(ctx: &AppCtx, name: &str, dep: &Dependency) -> Result<String
                 .find(|p| p.extension().is_some_and(|e| e == "csproj"))
                 .with_context(|| format!("no .csproj under {} for `{name}`", dir.display()))?
         };
+        let rel = proj.strip_prefix(&ctx.root).unwrap_or(&proj);
         return Ok(format!(
             "    <ProjectReference Include=\"{}\" />\n",
-            xml_attr(&proj.display().to_string())
+            xml_attr(&manifest_path(ctx, csproj_dir, rel))
         ));
     }
     if dep.git.is_some() || dep.url.is_some() {
@@ -86,7 +103,8 @@ pub fn sync_csproj(ctx: &AppCtx) -> Result<PathBuf> {
     let mut items = String::new();
     for (name, dep) in &ctx.manifest.dependencies {
         if dep.ecosystem == "csharp" {
-            items.push_str(&csharp_reference(ctx, name, dep)?);
+            let dir = csproj.parent().unwrap_or(&ctx.root).to_path_buf();
+            items.push_str(&csharp_reference(ctx, &dir, name, dep)?);
         }
     }
     let mut body = match (text.find(CSPROJ_BEGIN), text.find(CSPROJ_END)) {
@@ -112,7 +130,8 @@ pub fn sync_csproj(ctx: &AppCtx) -> Result<PathBuf> {
 
 fn dub_value(ctx: &AppCtx, name: &str, dep: &Dependency) -> Result<DubDep> {
     if let Some(path) = &dep.path {
-        return Ok(DubDep::Path(ctx.root.join(path).display().to_string()));
+        // dub.json / dub.sdl live at the project root.
+        return Ok(DubDep::Path(manifest_path(ctx, &ctx.root, Path::new(path))));
     }
     if dep.git.is_some() || dep.url.is_some() {
         bail!(

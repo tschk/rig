@@ -207,7 +207,7 @@ fn build_script_path(root: &Path) -> Result<Option<std::path::PathBuf>> {
 
 fn build_rs_markers(name: &str) -> (String, String) {
     (
-        format!("    // rig-link-begin:{name}\n"),
+        format!("\n    // rig-link-begin:{name}\n"),
         format!("    // rig-link-end:{name}\n"),
     )
 }
@@ -232,23 +232,15 @@ pub fn patch_build_rs_link(root: &Path, name: &str, native_rel: &str) -> Result<
             path.display()
         );
     };
+    // Right after the brace, so `fn main() {}` works too.
     let insert_at = main_at + "fn main() {".len();
-    let insert_at = text[insert_at..]
-        .find('\n')
-        .map(|n| insert_at + n + 1)
-        .unwrap_or(text.len());
     let rel = native_rel.replace('\\', "/").replace('"', "\\\"");
     let (begin, end) = build_rs_markers(name);
     let block = format!(
         "{begin}    {{\n        let dir = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"{rel}\");\n        println!(\"cargo:rustc-link-search=native={{}}\", dir.display());\n        if std::env::var_os(\"CARGO_CFG_UNIX\").is_some() {{\n            println!(\"cargo:rustc-link-arg=-Wl,-rpath,{{}}\", dir.display());\n        }}\n    }}\n{end}"
     );
     let mut out = text;
-    if !out[..insert_at].ends_with('\n') {
-        out.insert(insert_at, '\n');
-        out.insert_str(insert_at + 1, &block);
-    } else {
-        out.insert_str(insert_at, &block);
-    }
+    out.insert_str(insert_at, &block);
     std::fs::write(&path, out).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
@@ -279,6 +271,30 @@ fn strip_build_rs_link(text: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_rs_link_block_goes_inside_an_empty_main_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = "fn main() {}\n";
+        std::fs::write(dir.path().join("build.rs"), original).unwrap();
+        patch_build_rs_link(dir.path(), "foo", "target/rig/foo").unwrap();
+        patch_build_rs_link(dir.path(), "foo", "target/rig/foo").unwrap();
+        let patched = std::fs::read_to_string(dir.path().join("build.rs")).unwrap();
+        assert_eq!(
+            patched.matches("rig-link-begin:foo").count(),
+            1,
+            "{patched}"
+        );
+        assert!(
+            patched.find("rig-link-end:foo").unwrap() < patched.rfind('}').unwrap(),
+            "block escaped main:\n{patched}"
+        );
+        unpatch_build_rs_link(dir.path(), "foo").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("build.rs")).unwrap(),
+            original
+        );
+    }
     use std::fs;
 
     #[test]

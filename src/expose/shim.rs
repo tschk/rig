@@ -312,6 +312,11 @@ fn build_generic_surface(
         }
     }
     let mut exports = marker_exports(name, version);
+    // Marker symbols are defined by the façade itself; an upstream fn that
+    // auto-wraps to the same name (e.g. `pub fn last_panic`) would clash.
+    let before = wraps.len();
+    wraps.retain(|w| !exports.iter().any(|m| m.export_name == w.export_name));
+    scan.skipped_unfriendly += before - wraps.len();
     exports.extend(wraps);
     let note = scan_note(&scan);
     let lib_rs = generic_lib_rs_with_wraps(name, version, &exports, &note);
@@ -326,11 +331,13 @@ fn scan_note(scan: &ScanReport) -> String {
         .filter(|e| matches!(e.kind, ExportKind::AutoWrap | ExportKind::UpstreamExternC))
         .count();
     format!(
-        "auto-wrap: {callable} callable; skipped generics={} async={} unfriendly={} impl_methods={}",
+        "auto-wrap: {callable} callable; skipped generics={} async={} unfriendly={} impl_methods={} private={} unparsable_files={}",
         scan.skipped_generics,
         scan.skipped_async,
         scan.skipped_unfriendly,
-        scan.skipped_impl_methods
+        scan.skipped_impl_methods,
+        scan.skipped_private,
+        scan.parse_errors
     )
 }
 
@@ -353,6 +360,8 @@ fn write_surface_json(
             "async": scan.skipped_async,
             "unfriendly": scan.skipped_unfriendly,
             "impl_methods": scan.skipped_impl_methods,
+            "private": scan.skipped_private,
+            "unparsable_files": scan.parse_errors,
         },
         "source_root": scan.source_root.as_ref().map(|p| p.display().to_string()),
     });
